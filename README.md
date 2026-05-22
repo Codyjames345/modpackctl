@@ -6,7 +6,7 @@ A lightweight CLI for managing a CurseForge modpack across versions, with git-ba
 
 `modpackctl.py` is the pack maintainer's tool. It tracks mod versions by importing CurseForge export zips, generates changelogs, builds client and server release zips, and publishes them to GitHub with a single command.
 
-`update.py` ships inside the release zip. Players double-click it to check for updates and apply them without re-downloading the entire modpack.
+`update.py` ships alongside the release zip. Players double-click it to check for updates and apply them without re-downloading the entire modpack.
 
 ## Prerequisites
 
