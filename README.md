@@ -65,12 +65,12 @@ python modpackctl.py publish 1.2.0 --message "Improved performance and fixed cra
 | Command | Description |
 |---|---|
 | `init <zip> [--force]` | Initialize from a CurseForge export zip. `--force` resets history but keeps the download cache. |
-| `commit <zip> [--major]` | Record a new version from an updated export. Version is bumped automatically. `--major` forces a major bump. |
+| `commit <zip> [--major] [--message "..."]` | Record a new version from an updated export. Version is bumped automatically. `--major` forces a major bump. `--message` sets the release note shown to players in the updater changelog. |
 | `log` | List all committed versions with diff stats. |
 | `changelog <v1> [output.md]` | Generate a changelog for `v1` as an initial release. |
 | `changelog <v1> <v2> [output.md]` | Generate a changelog between two versions. |
 | `release <version> [--client\|--server]` | Build a release zip. `--client` also produces a baked `releases/client-updater.py`. Without a flag, includes all mods. |
-| `publish <version> [--message "..."]` | Build a client release, create a GitHub Release, and push `versions.json` to `gh-pages`. |
+| `publish <version> [--message "..."]` | Build a client release, create a GitHub Release, and push `versions.json` and `snapshots/` to `gh-pages`. `--message` overrides the message set at `commit` time. |
 | `update <version> [--client\|--server]` | Rebuild the `build/` folder for a version without zipping. |
 | `purge [--all]` | Remove stale files from the download cache. Without `--all`, only removes mods not in the latest snapshot. |
 | `build-pages` | Write `versions.json` and `snapshots/` to a local `gh-pages/` folder. Useful for manually pushing to `gh-pages` if `publish` fails. |

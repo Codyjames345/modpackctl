@@ -437,6 +437,7 @@ def add_version(
     removed: int = 0,
     updated: int = 0,
     modloader: str = "",
+    message: str = "",
 ) -> None:
     """Append a new version entry to the log, including diff stats and optional modloader id."""
     log = load_log()
@@ -450,6 +451,8 @@ def add_version(
     }
     if modloader:
         entry["modloader"] = modloader
+    if message:
+        entry["message"] = message
     log.append(entry)
     save_json(LOG_FILE, log)
 
@@ -651,7 +654,7 @@ def init(source: str, force: bool = False) -> None:
 # -------------------------
 
 
-def commit(source: str, major: bool = False) -> tuple[str, str, int] | None:
+def commit(source: str, major: bool = False, message: str = "") -> tuple[str, str, int] | None:
     """
     Record a new version from an updated CurseForge export zip.
 
@@ -702,6 +705,7 @@ def commit(source: str, major: bool = False) -> tuple[str, str, int] | None:
         removed=len(changes["removed"]),
         updated=len(changes["updated"]),
         modloader=new_modloader,
+        message=message,
     )
 
     if not old_version:
@@ -1238,9 +1242,15 @@ def publish(version: str, message: str = "") -> None:
 
     user, repo = get_github_info()
 
-    if not get_log_entry(version):
+    log_entry = get_log_entry(version)
+    if not log_entry:
         print(f"[ERROR] Version '{version}' not found in log.")
         sys.exit(1)
+
+    if not message:
+        message = log_entry.get("message", "")
+    elif message != log_entry.get("message", ""):
+        set_version_message(version, message)
 
     print(f"Building client release for v{version}...")
     zip_path = release_client(version)
@@ -1278,9 +1288,6 @@ def publish(version: str, message: str = "") -> None:
         sys.exit(1)
     finally:
         notes_path.unlink(missing_ok=True)
-
-    if message:
-        set_version_message(version, message)
 
     print("Pushing versions.json + snapshots to gh-pages...")
     try:
@@ -1413,11 +1420,11 @@ modpackctl — Minecraft modpack version control
 
 Commands:
   init          <zip> [--force]                   Initialise repo from a CurseForge export zip
-  commit        <zip> [--major]                   Record a new version from an updated zip
+  commit        <zip> [--major] [--message "..."]  Record a new version; --message sets the release note shown to players
   log                                             List all committed versions
   changelog     <v1> <v2> [out] [--message "..."]  Write a changelog between two versions
   release       <version> [--client|--server]     Build a release zip
-  publish       <version> [--message "..."]        Build client release + push to GitHub
+  publish       <version> [--message "..."]        Build client release + push to GitHub (--message overrides the committed message)
   update        <version> [--client|--server]      Rebuild the build folder for a version
   purge         [--all]                            Remove old files from the download cache
   build-pages                                     Build versions.json + snapshots/ locally to gh-pages/
@@ -1442,9 +1449,14 @@ if __name__ == "__main__":
 
     elif cmd == "commit":
         if len(sys.argv) < 3:
-            print("Usage: commit <zip> [--major]")
+            print("Usage: commit <zip> [--major] [--message \"...\"]")
             sys.exit(1)
-        commit(sys.argv[2], "--major" in sys.argv)
+        commit_message = ""
+        if "--message" in sys.argv:
+            message_index = sys.argv.index("--message")
+            if message_index + 1 < len(sys.argv):
+                commit_message = sys.argv[message_index + 1]
+        commit(sys.argv[2], "--major" in sys.argv, message=commit_message)
 
     elif cmd == "log":
         show_log()

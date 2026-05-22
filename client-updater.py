@@ -276,11 +276,12 @@ RED       = "#e05050"
 GREEN     = "#00d4aa"
 YELLOW    = "#f0c060"
 
-FONT_TITLE = ("Consolas", 13, "bold")
-FONT_LARGE = ("Consolas", 12)
-FONT_BOLD  = ("Consolas", 11, "bold")
-FONT_BODY  = ("Consolas", 10)
-FONT_MONO  = ("Consolas", 9)
+FONT_TITLE        = ("Consolas", 13, "bold")
+FONT_LARGE        = ("Consolas", 12)
+FONT_BOLD         = ("Consolas", 11, "bold")
+FONT_BODY         = ("Consolas", 10)
+FONT_MONO         = ("Consolas", 9)
+FONT_MONO_ITALIC  = ("Consolas", 9, "italic")
 
 
 # -------------------------
@@ -572,40 +573,41 @@ class UpdaterApp(tk.Tk):
             text.pack(fill="both", expand=True)
             scrollbar.config(command=text.yview)
 
-            text.tag_config("section", font=("Consolas", 10, "bold"), foreground=ACCENT)
-            text.tag_config("added",   foreground=GREEN)
-            text.tag_config("removed", foreground=RED)
-            text.tag_config("updated", foreground=YELLOW)
-            text.tag_config("dim",     foreground=TEXT_DIM)
+            text.tag_config("section",     font=FONT_BOLD,        foreground=ACCENT)
+            text.tag_config("added",       font=FONT_MONO,        foreground=GREEN)
+            text.tag_config("removed",     font=FONT_MONO,        foreground=RED)
+            text.tag_config("updated",     font=FONT_MONO,        foreground=YELLOW)
+            text.tag_config("dim",         font=FONT_MONO,        foreground=TEXT_DIM)
+            text.tag_config("placeholder", font=FONT_MONO_ITALIC, foreground=TEXT_DIM)
 
             text.config(state="normal")
 
-            text.insert("end", "## Added\n", "section")
+            text.insert("end", "Added\n", "section")
             text.insert("end", "\n")
             if changes["added"]:
                 for _, entry in changes["added"]:
-                    text.insert("end", f"- {entry['name']}\n", "added")
+                    text.insert("end", f"  - {entry['name']}\n", "added")
             else:
-                text.insert("end", "_No mods added._\n", "dim")
+                text.insert("end", "  No mods added.\n", "placeholder")
             text.insert("end", "\n")
 
-            text.insert("end", "## Removed\n", "section")
+            text.insert("end", "Removed\n", "section")
             text.insert("end", "\n")
             if changes["removed"]:
                 for _, entry in changes["removed"]:
-                    text.insert("end", f"- {entry['name']}\n", "removed")
+                    text.insert("end", f"  - {entry['name']}\n", "removed")
             else:
-                text.insert("end", "_No mods removed._\n", "dim")
+                text.insert("end", "  No mods removed.\n", "placeholder")
             text.insert("end", "\n")
 
-            text.insert("end", "## Updated\n", "section")
+            text.insert("end", "Updated\n", "section")
             text.insert("end", "\n")
             if changes["updated"]:
                 for _, old_entry, new_entry in changes["updated"]:
-                    text.insert("end", f"- {new_entry['name']}", "updated")
-                    text.insert("end", f"  _({old_entry['file']} → {new_entry['file']})_\n", "dim")
+                    text.insert("end", f"  - {new_entry['name']}", "updated")
+                    text.insert("end", f"  ({old_entry['file']} → {new_entry['file']})\n", "dim")
             else:
-                text.insert("end", "_No mods updated._\n", "dim")
+                text.insert("end", "  No mods updated.\n", "placeholder")
 
             text.config(state="disabled")
 
