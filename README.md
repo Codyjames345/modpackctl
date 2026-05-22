@@ -73,6 +73,7 @@ python modpackctl.py publish 1.2.0 --message "Improved performance and fixed cra
 | `publish <version> [--message "..."]` | Build a client release, create a GitHub Release, and push `versions.json` to `gh-pages`. |
 | `update <version> [--client\|--server]` | Rebuild the `build/` folder for a version without zipping. |
 | `purge [--all]` | Remove stale files from the download cache. Without `--all`, only removes mods not in the latest snapshot. |
+| `build-pages` | Write `versions.json` and `snapshots/` to a local `gh-pages/` folder. Useful for manually pushing to `gh-pages` if `publish` fails. |
 | `bake-updater` | Write a pre-configured `releases/client-updater.py` using credentials from `modpackctl.toml`, without building a full release. |
 | `export-example` | Write the built-in config template to `modpackctl.toml.example`. |
 

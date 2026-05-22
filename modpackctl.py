@@ -1079,16 +1079,29 @@ def _bake_updater_script(dest_path: Path) -> bool:
     return True
 
 
+def set_version_message(version: str, message: str) -> None:
+    """Store or clear a release message on the log entry for the given version."""
+    log = load_log()
+    for entry in log:
+        if str(entry["version"]) == str(version):
+            if message:
+                entry["message"] = message
+            else:
+                entry.pop("message", None)
+            break
+    save_json(LOG_FILE, log)
+
+
 def _build_versions_json() -> dict:
     """Build the versions.json payload served from gh-pages for the player updater."""
     log = load_log()
-    return {
-        "latest": log[-1]["version"] if log else None,
-        "versions": [
-            {"version": entry["version"], "commit": entry["commit"], "time": entry["time"]}
-            for entry in log
-        ],
-    }
+    versions = []
+    for entry in log:
+        version_entry: dict = {"version": entry["version"], "commit": entry["commit"], "time": entry["time"]}
+        if entry.get("message"):
+            version_entry["message"] = entry["message"]
+        versions.append(version_entry)
+    return {"latest": log[-1]["version"] if log else None, "versions": versions}
 
 
 def _get_notes_file_for_release(version: str, message: str = "") -> Path:
@@ -1266,12 +1279,16 @@ def publish(version: str, message: str = "") -> None:
     finally:
         notes_path.unlink(missing_ok=True)
 
+    if message:
+        set_version_message(version, message)
+
     print("Pushing versions.json + snapshots to gh-pages...")
     try:
         _push_pages_assets()
     except Exception:
         print("[WARN] Could not update gh-pages. Players won't see this version in the updater.")
-        print("       You may need to push versions.json and snapshots/ manually.")
+        print("       Run 'python modpackctl.py build-pages' to generate the files locally,")
+        print("       then push them to the gh-pages branch manually.")
 
     pages_url   = f"https://{user}.github.io/{repo}/"
     release_url = f"https://github.com/{user}/{repo}/releases/tag/{tag}"
@@ -1285,6 +1302,18 @@ def publish(version: str, message: str = "") -> None:
     print("[OK] Done. Share the release URL with your players.")
     print("     New players: download the zip from the release page.")
     print("     Existing players: run client-updater.py from their current install.")
+
+
+def build_pages() -> None:
+    """Write versions.json and snapshots/ to a local gh-pages/ folder for manual publishing."""
+    if not REPO.exists():
+        print("[ERROR] Repository not initialized. Run 'init' first.")
+        sys.exit(1)
+    dest = Path("gh-pages")
+    dest.mkdir(parents=True, exist_ok=True)
+    _write_pages_assets(dest)
+    print(f"[OK] Built gh-pages assets → {dest}/")
+    print("     Push the contents of this folder to your gh-pages branch.")
 
 
 def bake_updater() -> None:
@@ -1391,6 +1420,7 @@ Commands:
   publish       <version> [--message "..."]        Build client release + push to GitHub
   update        <version> [--client|--server]      Rebuild the build folder for a version
   purge         [--all]                            Remove old files from the download cache
+  build-pages                                     Build versions.json + snapshots/ locally to gh-pages/
   bake-updater                                    Write a pre-configured client-updater.py to releases/
   export-example                                  Write modpackctl.toml.example from the built-in defaults
 """.strip()
@@ -1479,6 +1509,9 @@ if __name__ == "__main__":
 
     elif cmd == "purge":
         purge_cache("--all" in sys.argv)
+
+    elif cmd == "build-pages":
+        build_pages()
 
     elif cmd == "bake-updater":
         bake_updater()

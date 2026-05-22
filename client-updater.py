@@ -17,6 +17,7 @@ import tkinter as tk
 import urllib.error
 import urllib.request
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from tkinter import filedialog, messagebox
 from urllib.parse import unquote, urlparse
@@ -298,6 +299,7 @@ class UpdaterApp(tk.Tk):
         self.modpack_dir: Path | None    = None
         self.local_version: str | None   = None
         self.latest_version: str | None  = None
+        self.release_message: str        = ""
         self.old_snapshot: dict          = {}
         self.new_snapshot: dict          = {}
         self.update_plan: dict           = {}
@@ -486,6 +488,7 @@ class UpdaterApp(tk.Tk):
                 version_str = str(entry["version"])
                 if version_str == str(self.latest_version):
                     new_commit = entry["commit"]
+                    self.release_message = entry.get("message", "")
                 if self.local_version and version_str == str(self.local_version):
                     old_commit = entry["commit"]
 
@@ -547,6 +550,13 @@ class UpdaterApp(tk.Tk):
                 font=FONT_BODY, bg=DARK_BG, fg=TEXT, pady=8,
             ).pack(fill="x", padx=20)
 
+            if self.release_message:
+                tk.Label(
+                    frame, text=self.release_message,
+                    font=FONT_BODY, bg=DARK_BG, fg=TEXT_DIM,
+                    wraplength=560, justify="left",
+                ).pack(fill="x", padx=20, pady=(0, 8))
+
             text_frame = tk.Frame(frame, bg=PANEL_BG)
             text_frame.pack(fill="both", expand=True, padx=20, pady=(0, 10))
             scrollbar = tk.Scrollbar(text_frame)
@@ -569,23 +579,34 @@ class UpdaterApp(tk.Tk):
             text.tag_config("dim",     foreground=TEXT_DIM)
 
             text.config(state="normal")
+
+            text.insert("end", "## Added\n", "section")
+            text.insert("end", "\n")
             if changes["added"]:
-                text.insert("end", f"+  Added ({num_added})\n", "section")
                 for _, entry in changes["added"]:
-                    text.insert("end", f"   + {entry['name']}\n", "added")
-                text.insert("end", "\n")
+                    text.insert("end", f"- {entry['name']}\n", "added")
+            else:
+                text.insert("end", "_No mods added._\n", "dim")
+            text.insert("end", "\n")
+
+            text.insert("end", "## Removed\n", "section")
+            text.insert("end", "\n")
             if changes["removed"]:
-                text.insert("end", f"-  Removed ({num_removed})\n", "section")
                 for _, entry in changes["removed"]:
-                    text.insert("end", f"   - {entry['name']}\n", "removed")
-                text.insert("end", "\n")
+                    text.insert("end", f"- {entry['name']}\n", "removed")
+            else:
+                text.insert("end", "_No mods removed._\n", "dim")
+            text.insert("end", "\n")
+
+            text.insert("end", "## Updated\n", "section")
+            text.insert("end", "\n")
             if changes["updated"]:
-                text.insert("end", f"~  Updated ({num_updated})\n", "section")
-                for _, _, new_entry in changes["updated"]:
-                    text.insert("end", f"   ~ {new_entry['name']}\n", "updated")
-                text.insert("end", "\n")
-            if not (changes["added"] or changes["removed"] or changes["updated"]):
-                text.insert("end", "No mod-list changes (metadata only).\n", "dim")
+                for _, old_entry, new_entry in changes["updated"]:
+                    text.insert("end", f"- {new_entry['name']}", "updated")
+                    text.insert("end", f"  _({old_entry['file']} → {new_entry['file']})_\n", "dim")
+            else:
+                text.insert("end", "_No mods updated._\n", "dim")
+
             text.config(state="disabled")
 
             button_row = tk.Frame(frame, bg=DARK_BG)
@@ -653,17 +674,30 @@ class UpdaterApp(tk.Tk):
             downloaded_files: list[tuple[Path, str]] = []
             failed_downloads: list[str] = []
 
-            # Phase 1: download all new/updated files first
-            for index, (project_id, file_id, display_name) in enumerate(downloads, 1):
-                self._set_progress(f"Downloading {index} / {len(downloads)}: {display_name}")
-                self._log(f"  ↓ {display_name}")
-                local_path = download_mod_file(project_id, file_id, tmp_dir)
-                if local_path is None:
-                    failed_downloads.append(display_name)
-                    self._log(f"  [FAIL] {display_name}")
-                    continue
-                category = classify_downloaded_file(local_path)
-                downloaded_files.append((local_path, category))
+            # Phase 1: download all new/updated files concurrently
+            completed_count = 0
+            count_lock = threading.Lock()
+            if downloads:
+                self._set_progress(f"Downloading 0 / {len(downloads)}…")
+            with ThreadPoolExecutor(max_workers=5) as executor:
+                future_map = {
+                    executor.submit(download_mod_file, project_id, file_id, tmp_dir): (project_id, display_name)
+                    for project_id, file_id, display_name in downloads
+                }
+                for future in as_completed(future_map):
+                    _, display_name = future_map[future]
+                    local_path = future.result()
+                    with count_lock:
+                        completed_count += 1
+                        count = completed_count
+                    self._set_progress(f"Downloading {count} / {len(downloads)}…")
+                    if local_path is None:
+                        failed_downloads.append(display_name)
+                        self._log(f"  [FAIL] {display_name}")
+                        continue
+                    category = classify_downloaded_file(local_path)
+                    downloaded_files.append((local_path, category))
+                    self._log(f"  ↓ {display_name}")
 
             if failed_downloads:
                 self._log("")
