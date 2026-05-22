@@ -3,7 +3,14 @@ user = "<yourName>"
 repo = "<yourRepo>"
 
 [settings]
-modpack_prefix = "<YourModpackName>"
+# Prefix added to the start of released .zip files
+file_prefix = "<YourModpackName>"
+
+# Display name shown in the updater GUI (optional; defaults to file_prefix)
+# modpack_name = "My Modpack"
+
+# URL to a logo image shown in the updater header (optional; PNG or GIF, ~32px tall)
+# logo_url = "https://example.com/logo.png"
 
 # List project IDs to exclude from client releases (server-side only mods)
 server_only = []

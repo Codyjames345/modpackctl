@@ -52,9 +52,10 @@ user = "<yourName>"
 repo = "<yourRepo>"
 
 [settings]
-modpack_prefix = "<YourModpackName>"
+# Prefix added to the start of released .zip files
+file_prefix = "<YourModpackName>"
 
-# Display name shown in the updater GUI (optional; defaults to modpack_prefix)
+# Display name shown in the updater GUI (optional; defaults to file_prefix)
 # modpack_name = "My Modpack"
 
 # URL to a logo image shown in the updater header (optional; PNG or GIF, ~32px tall)
@@ -90,15 +91,15 @@ def get_github_info() -> tuple[str, str]:
         sys.exit(1)
 
 
-def get_modpack_prefix() -> str:
-    """Return the modpack_prefix string used when naming release zips."""
+def get_file_prefix() -> str:
+    """Return the file_prefix string used when naming release zips."""
     cfg = load_config()
     try:
-        return cfg["settings"]["modpack_prefix"]
+        return cfg["settings"]["file_prefix"]
     except KeyError:
-        print("[ERROR] Missing modpack_prefix in [settings]. Expected modpackctl.toml with:")
+        print("[ERROR] Missing file_prefix in [settings]. Expected modpackctl.toml with:")
         print("  [settings]")
-        print('  modpack_prefix = "YourModpackName"')
+        print('  file_prefix = "YourModpackName"')
         sys.exit(1)
 
 
@@ -1011,8 +1012,8 @@ def release(
         return None
 
     RELEASES.mkdir(parents=True, exist_ok=True)
-    pack_prefix = get_modpack_prefix()
-    zip_name    = f"{pack_prefix}-{version}-{suffix}.zip" if suffix else f"{pack_prefix}-{version}.zip"
+    prefix      = get_file_prefix()
+    zip_name    = f"{prefix}-{version}-{suffix}.zip" if suffix else f"{prefix}-{version}.zip"
     zip_path    = RELEASES / zip_name
 
     print(f"\nBuilding release zip at {zip_path}...")
@@ -1082,7 +1083,7 @@ def _bake_updater_script(dest_path: Path) -> bool:
     user, repo = get_github_info()
     cfg      = load_config()
     settings = cfg.get("settings", {})
-    modpack_name = settings.get("modpack_name") or settings.get("modpack_prefix", repo)
+    modpack_name = settings.get("modpack_name") or settings.get("file_prefix", repo)
     logo_url     = settings.get("logo_url", "")
     content = UPDATE_SCRIPT.read_text(encoding="utf-8")
     content = content.replace('"__GITHUB_USER__"', f'"{user}"')
@@ -1437,17 +1438,17 @@ USAGE = """
 modpackctl — Minecraft modpack version control
 
 Commands:
-  init          <zip> [--force]                   Initialise repo from a CurseForge export zip
-  commit        <zip> [--major] [--message "..."]  Record a new version; --message sets the release note shown to players
-  log                                             List all committed versions
-  changelog     <v1> <v2> [out] [--message "..."]  Write a changelog between two versions
-  release       <version> [--client|--server]     Build a release zip
-  publish       <version> [--message "..."]        Build client release + push to GitHub (--message overrides the committed message)
-  update        <version> [--client|--server]      Rebuild the build folder for a version
-  purge         [--all]                            Remove old files from the download cache
-  build-pages                                     Build versions.json + snapshots/ locally to gh-pages/
-  bake-updater                                    Write a pre-configured client-updater.py to releases/
-  export-example                                  Write modpackctl.toml.example from the built-in defaults
+  init          <zip> [--force]                     Initialise repo from a CurseForge export zip
+  commit        <zip> [--major] [--message "..."]   Record a new version; --message sets the release note shown to players
+  log                                               List all committed versions
+  changelog     <v1> <v2> [out] [--message "..."]   Write a changelog between two versions
+  release       <version> [--client|--server]       Build a release zip
+  publish       <version> [--message "..."]         Build client release + push to GitHub (--message overrides the committed message)
+  update        <version> [--client|--server]       Rebuild the build folder for a version
+  purge         [--all]                             Remove old files from the download cache
+  build-pages                                       Build versions.json + snapshots/ locally to gh-pages/
+  bake-updater                                      Write a pre-configured client-updater.py to releases/
+  export-example                                    Write modpackctl.toml.example from the built-in defaults
 """.strip()
 
 if __name__ == "__main__":
