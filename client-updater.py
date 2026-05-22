@@ -246,7 +246,7 @@ def build_update_plan(old_snapshot: dict, new_snapshot: dict, modpack_dir: Path)
     """
     Build an ordered list of operations to migrate from old_snapshot to
     new_snapshot in modpack_dir. Returns a dict with:
-      - 'download': [(project_id, file_id, display_name), ...]
+      - 'download': [(project_id, file_id, display_name, is_update), ...]
       - 'delete':   [(Path, display_name), ...]
     """
     changes  = diff_snapshots(old_snapshot, new_snapshot)
@@ -262,10 +262,10 @@ def build_update_plan(old_snapshot: dict, new_snapshot: dict, modpack_dir: Path)
         existing = locate_existing_file(project_id, old_entry, modpack_dir)
         if existing:
             delete.append((existing, old_entry["name"]))
-        download.append((project_id, new_entry["file_id"], new_entry["name"]))
+        download.append((project_id, new_entry["file_id"], new_entry["name"], True))
 
     for project_id, new_entry in changes["added"]:
-        download.append((project_id, new_entry["file_id"], new_entry["name"]))
+        download.append((project_id, new_entry["file_id"], new_entry["name"], False))
 
     return {"download": download, "delete": delete}
 
@@ -274,30 +274,12 @@ def build_update_plan(old_snapshot: dict, new_snapshot: dict, modpack_dir: Path)
 # GUI THEME
 # -------------------------
 
-DARK_BG   = "#1a1a2e"
-PANEL_BG  = "#16213e"
-ACCENT    = "#00d4aa"
-ACCENT_HV = "#00b894"
-ACCENT2   = "#0f3460"
-TEXT      = "#e0e0e0"
-TEXT_DIM  = "#7a8a9a"
-RED       = "#e05050"
-GREEN     = "#00d4aa"
-YELLOW    = "#f0c060"
-
-FONT_TITLE        = ("Consolas", 13, "bold")
-FONT_LARGE        = ("Consolas", 12)
-FONT_BOLD         = ("Consolas", 11, "bold")
-FONT_BODY         = ("Consolas", 10)
-FONT_MONO         = ("Consolas", 9)
-FONT_MONO_ITALIC  = ("Consolas", 9, "italic")
-
 _COLOUR_DEFAULTS: dict[str, str] = {
-    "DARK_BG":   "#1a1a2e",
-    "PANEL_BG":  "#16213e",
-    "ACCENT":    "#00d4aa",
-    "ACCENT_HV": "#00b894",
-    "ACCENT2":   "#0f3460",
+    "DARK_BG":   "#0c0431",
+    "PANEL_BG":  "#120647",
+    "ACCENT":    "#fedb0e",
+    "ACCENT_HV": "#d8ba0d",
+    "ACCENT2":   "#630a26",
     "TEXT":      "#e0e0e0",
     "TEXT_DIM":  "#7a8a9a",
     "RED":       "#e05050",
@@ -307,16 +289,34 @@ _COLOUR_DEFAULTS: dict[str, str] = {
 
 _COLOUR_LABELS: dict[str, str] = {
     "DARK_BG":   "Background",
-    "PANEL_BG":  "Panel",
-    "ACCENT":    "Accent / Highlight",
-    "ACCENT_HV": "Accent (hover)",
-    "ACCENT2":   "Header background",
+    "PANEL_BG":  "Panels / Secondary buttons",
+    "ACCENT":    "Header text / Primary buttons",
+    "ACCENT_HV": "Primary buttons (clicked)",
+    "ACCENT2":   "Header background / Secondary buttons (clicked)",
     "TEXT":      "Text",
     "TEXT_DIM":  "Dim text",
-    "RED":       "Red  (removed mods)",
-    "GREEN":     "Green  (added mods)",
-    "YELLOW":    "Yellow  (updated mods)",
+    "RED":       "Changelog: removed",
+    "GREEN":     "Changelog: added",
+    "YELLOW":    "Changelog: updated",
 }
+
+DARK_BG   = _COLOUR_DEFAULTS["DARK_BG"]
+PANEL_BG  = _COLOUR_DEFAULTS["PANEL_BG"]
+ACCENT    = _COLOUR_DEFAULTS["ACCENT"]
+ACCENT_HV = _COLOUR_DEFAULTS["ACCENT_HV"]
+ACCENT2   = _COLOUR_DEFAULTS["ACCENT2"]
+TEXT      = _COLOUR_DEFAULTS["TEXT"]
+TEXT_DIM  = _COLOUR_DEFAULTS["TEXT_DIM"]
+RED       = _COLOUR_DEFAULTS["RED"]
+GREEN     = _COLOUR_DEFAULTS["GREEN"]
+YELLOW    = _COLOUR_DEFAULTS["YELLOW"]
+
+FONT_TITLE        = ("Consolas", 13, "bold")
+FONT_LARGE        = ("Consolas", 12)
+FONT_BOLD         = ("Consolas", 11, "bold")
+FONT_BODY         = ("Consolas", 10)
+FONT_MONO         = ("Consolas", 9)
+FONT_MONO_ITALIC  = ("Consolas", 9, "italic")
 
 
 def _apply_colour_overrides(overrides: dict) -> None:
@@ -342,8 +342,7 @@ class UpdaterApp(tk.Tk):
         super().__init__()
         self.title(f"{MODPACK_NAME} Modpack Updater")
         self.configure(bg=DARK_BG)
-        self.geometry("640x540")
-        self.minsize(560, 420)
+        self.minsize(760, 600)
 
         self.prefs: dict = load_prefs()
 
@@ -352,6 +351,13 @@ class UpdaterApp(tk.Tk):
         if saved_colours:
             _apply_colour_overrides(saved_colours)
             self.configure(bg=DARK_BG)
+
+        try:
+            self.geometry(self.prefs.get("geometry", "760x600"))
+        except tk.TclError:
+            self.geometry("760x600")
+
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self.modpack_dir: Path | None       = None
         self.local_version: str | None      = None
@@ -366,20 +372,31 @@ class UpdaterApp(tk.Tk):
         self.update_plan: dict              = {}
 
         # Widget refs reused across screens
-        self._current_frame: tk.Frame | None    = None
-        self._current_builder                   = None
-        self._logo_image: tk.PhotoImage | None  = None
+        self._current_frame: tk.Frame | None        = None
+        self._current_builder                       = None
+        self._logo_image: tk.PhotoImage | None      = None
+        self._header_logo_label: tk.Label | None    = None
+        self._header_title_label: tk.Label | None   = None
+        self._update_progress_label: tk.Label | None = None
+        self._update_button_row: tk.Frame | None    = None
         self._path_var      = tk.StringVar()
         self._picker_status = tk.StringVar()
         self._progress_var  = tk.StringVar()
-        self._log_text: tk.Text | None          = None
+        self._log_text: tk.Text | None              = None
 
         if LOGO_URL:
             threading.Thread(target=self._prefetch_logo, daemon=True).start()
 
-        self._show_folder_picker()
+        saved_dir = self.prefs.get("modpack_dir")
+        if saved_dir and Path(saved_dir).is_dir():
+            self.modpack_dir = Path(saved_dir)
+            self._show_checking()
+        else:
+            self._show_folder_picker()
 
     # ---- logo prefetch ----
+
+    _LOGO_TARGET_HEIGHT = 32
 
     def _prefetch_logo(self) -> None:
         try:
@@ -389,12 +406,30 @@ class UpdaterApp(tk.Tk):
             encoded = base64.b64encode(image_bytes).decode("ascii")
             def create_image() -> None:
                 try:
-                    self._logo_image = tk.PhotoImage(data=encoded)
+                    image = tk.PhotoImage(data=encoded)
+                    height = image.height()
+                    if height > self._LOGO_TARGET_HEIGHT:
+                        factor = max(1, round(height / self._LOGO_TARGET_HEIGHT))
+                        image = image.subsample(factor)
+                    self._logo_image = image
+                    if self._header_logo_label is not None and self._header_title_label is not None:
+                        self._header_logo_label.config(image=image)
+                        self._header_logo_label.pack(
+                            side="left", padx=(0, 8), before=self._header_title_label,
+                        )
+                        self._header_title_label.config(text=f"{MODPACK_NAME} Modpack Updater")
                 except Exception:
                     pass
             self.after(0, create_image)
         except Exception:
             pass
+
+    # ---- window lifecycle ----
+
+    def _on_close(self) -> None:
+        self.prefs["geometry"] = self.geometry()
+        save_prefs(self.prefs)
+        self.destroy()
 
     # ---- frame management ----
 
@@ -409,12 +444,22 @@ class UpdaterApp(tk.Tk):
     def _header(self, parent: tk.Misc, subtitle: str = "") -> tk.Frame:
         header = tk.Frame(parent, bg=ACCENT2, padx=20, pady=14)
         header.pack(fill="x")
+
+        logo_label = tk.Label(header, bg=ACCENT2)
+        self._header_logo_label = logo_label
         if self._logo_image is not None:
-            tk.Label(header, image=self._logo_image, bg=ACCENT2).pack(side="left", padx=(0, 8))
-        tk.Label(
-            header, text=f"⛏  {MODPACK_NAME} Modpack Updater",
+            logo_label.config(image=self._logo_image)
+            logo_label.pack(side="left", padx=(0, 8))
+            title_text = f"{MODPACK_NAME} Modpack Updater"
+        else:
+            title_text = f"⛏  {MODPACK_NAME} Modpack Updater"
+
+        title_label = tk.Label(
+            header, text=title_text,
             font=FONT_TITLE, bg=ACCENT2, fg=ACCENT,
-        ).pack(side="left")
+        )
+        title_label.pack(side="left")
+        self._header_title_label = title_label
         tk.Button(
             header, text="⚙",
             font=FONT_BODY, bg=ACCENT2, fg=TEXT_DIM,
@@ -447,13 +492,13 @@ class UpdaterApp(tk.Tk):
             command=command,
         )
 
-    # ---- screen: colour settings ----
+    # ---- screen: settings ----
 
     def _show_colour_settings(self) -> None:
         dialog = tk.Toplevel(self)
-        dialog.title("Colour Settings")
+        dialog.title("Settings")
         dialog.configure(bg=DARK_BG)
-        dialog.geometry("480x480")
+        dialog.geometry("620x580")
         dialog.resizable(False, False)
         dialog.transient(self)
         dialog.grab_set()
@@ -463,10 +508,45 @@ class UpdaterApp(tk.Tk):
 
         header = tk.Frame(dialog, bg=ACCENT2, padx=16, pady=10)
         header.pack(fill="x")
-        tk.Label(header, text="Colour Settings", font=FONT_BOLD, bg=ACCENT2, fg=ACCENT).pack(side="left")
+        tk.Label(header, text="Settings", font=FONT_BOLD, bg=ACCENT2, fg=ACCENT).pack(side="left")
 
         body = tk.Frame(dialog, bg=DARK_BG, padx=20, pady=16)
         body.pack(fill="both", expand=True)
+
+        # --- Modpack Location ---
+        tk.Label(
+            body, text="Modpack Location", font=FONT_BOLD, bg=DARK_BG, fg=TEXT,
+        ).pack(anchor="w", pady=(0, 6))
+
+        location_var = tk.StringVar(value=self.prefs.get("modpack_dir", ""))
+        location_row = tk.Frame(body, bg=DARK_BG)
+        location_row.pack(fill="x", pady=(0, 16))
+
+        tk.Entry(
+            location_row, textvariable=location_var, font=FONT_MONO,
+            bg=PANEL_BG, fg=TEXT, relief="flat", insertbackground=TEXT,
+        ).pack(side="left", fill="x", expand=True, ipady=3)
+
+        def browse_location() -> None:
+            initial = location_var.get() or str(Path.home())
+            chosen = filedialog.askdirectory(
+                initialdir=initial, title="Select your modpack folder", parent=dialog,
+            )
+            if chosen:
+                location_var.set(chosen)
+
+        tk.Button(
+            location_row, text="Browse…", font=FONT_BODY,
+            bg=PANEL_BG, fg=TEXT_DIM,
+            activebackground=ACCENT2, activeforeground=TEXT,
+            relief="flat", bd=0, padx=14, cursor="hand2",
+            command=browse_location,
+        ).pack(side="left", padx=(8, 0))
+
+        # --- Colour Settings ---
+        tk.Label(
+            body, text="Colour Settings", font=FONT_BOLD, bg=DARK_BG, fg=TEXT,
+        ).pack(anchor="w", pady=(0, 6))
 
         for key, label_text in _COLOUR_LABELS.items():
             row = tk.Frame(body, bg=DARK_BG)
@@ -474,7 +554,7 @@ class UpdaterApp(tk.Tk):
 
             tk.Label(
                 row, text=label_text, font=FONT_BODY, bg=DARK_BG, fg=TEXT,
-                width=24, anchor="w",
+                width=50, anchor="w",
             ).pack(side="left")
 
             colour_var = tk.StringVar(value=current_colours.get(key, _COLOUR_DEFAULTS[key]))
@@ -529,6 +609,26 @@ class UpdaterApp(tk.Tk):
             new_colours = {key: var.get() for key, var in colour_vars.items()}
             _apply_colour_overrides(new_colours)
             self.prefs["colours"] = new_colours
+            new_location = location_var.get().strip()
+            if new_location:
+                new_path = Path(new_location)
+                if not new_path.is_dir():
+                    messagebox.showerror(
+                        "Invalid folder", f"Folder does not exist:\n{new_path}", parent=dialog,
+                    )
+                    return
+                if not is_likely_modpack_folder(new_path):
+                    confirmed = messagebox.askyesno(
+                        "Folder may not be a modpack",
+                        f"This folder does not contain a 'mods' subfolder or 'modpack_version.txt'.\n\n"
+                        f"{new_path}\n\nContinue anyway?",
+                        parent=dialog,
+                    )
+                    if not confirmed:
+                        return
+                self.prefs["modpack_dir"] = new_location
+                self.modpack_dir = new_path
+                self._path_var.set(new_location)
             save_prefs(self.prefs)
             self.configure(bg=DARK_BG)
             dialog.destroy()
@@ -536,7 +636,7 @@ class UpdaterApp(tk.Tk):
                 self._swap_frame(self._current_builder)
 
         tk.Button(
-            button_row, text="Reset to defaults", font=FONT_BODY,
+            button_row, text="Reset colours", font=FONT_BODY,
             bg=PANEL_BG, fg=TEXT_DIM,
             activebackground=ACCENT2, activeforeground=TEXT,
             relief="flat", bd=0, padx=14, pady=8, cursor="hand2",
@@ -548,7 +648,7 @@ class UpdaterApp(tk.Tk):
             activebackground=ACCENT2, activeforeground=TEXT,
             relief="flat", bd=0, padx=14, pady=8, cursor="hand2",
             command=dialog.destroy,
-        ).pack(side="right", padx=(0, 10))
+        ).pack(side="right", padx=(10, 0))
         self._primary_button(button_row, "Apply", apply_changes).pack(side="right")
 
     # ---- screen: folder picker ----
@@ -605,7 +705,7 @@ class UpdaterApp(tk.Tk):
 
             button_row = tk.Frame(frame, bg=DARK_BG)
             button_row.pack(fill="x", padx=20, pady=12)
-            self._secondary_button(button_row, "Close", self.destroy).pack(side="right", padx=(10, 0))
+            self._secondary_button(button_row, "Close", self._on_close).pack(side="right", padx=(10, 0))
             self._primary_button(button_row, "Next  →", self._confirm_folder).pack(side="right")
             return frame
         self._swap_frame(build)
@@ -709,7 +809,7 @@ class UpdaterApp(tk.Tk):
             self._secondary_button(
                 button_row, "Choose version…", self._show_version_options,
             ).pack(side="right", padx=(10, 0))
-            self._primary_button(button_row, "Close", self.destroy).pack(side="right")
+            self._primary_button(button_row, "Close", self._on_close).pack(side="right")
             return frame
         self._swap_frame(build)
 
@@ -771,7 +871,7 @@ class UpdaterApp(tk.Tk):
                     font=FONT_BODY, bg=DARK_BG, fg=RED,
                 ).pack(side="left")
 
-            fresh_var = tk.BooleanVar(value=self.fresh_install)
+            fresh_var = tk.BooleanVar(value=self.fresh_install or not self.local_version)
             fresh_row = tk.Frame(body, bg=DARK_BG)
             fresh_row.pack(fill="x", pady=(12, 4))
             tk.Checkbutton(
@@ -796,7 +896,7 @@ class UpdaterApp(tk.Tk):
 
             button_row = tk.Frame(frame, bg=DARK_BG)
             button_row.pack(fill="x", padx=20, pady=12)
-            self._secondary_button(button_row, "Cancel", self.destroy).pack(side="right", padx=(10, 0))
+            self._secondary_button(button_row, "Cancel", self._on_close).pack(side="right", padx=(10, 0))
             self._primary_button(button_row, "Continue  →", confirm).pack(side="right")
             return frame
         self._swap_frame(build)
@@ -865,11 +965,22 @@ class UpdaterApp(tk.Tk):
             num_removed = len(changes["removed"])
             num_updated = len(changes["updated"])
 
-            tk.Label(
-                frame,
-                text=f"{num_added} added · {num_removed} removed · {num_updated} updated",
-                font=FONT_BODY, bg=DARK_BG, fg=TEXT, pady=8,
-            ).pack(fill="x", padx=20)
+            stats_row = tk.Frame(frame, bg=DARK_BG)
+            stats_row.pack()
+            for label_text, colour in (
+                (str(num_added),   GREEN),
+                (" added",         TEXT_DIM),
+                ("  ·  ",          TEXT_DIM),
+                (str(num_removed), RED),
+                (" removed",       TEXT_DIM),
+                ("  ·  ",          TEXT_DIM),
+                (str(num_updated), YELLOW),
+                (" updated",       TEXT_DIM),
+            ):
+                tk.Label(
+                    stats_row, text=label_text,
+                    font=FONT_BODY, bg=DARK_BG, fg=colour, pady=8,
+                ).pack(side="left")
 
             if self.release_message:
                 tk.Label(
@@ -892,16 +1003,18 @@ class UpdaterApp(tk.Tk):
             text.pack(fill="both", expand=True)
             scrollbar.config(command=text.yview)
 
-            text.tag_config("section",     font=FONT_BOLD,        foreground=ACCENT)
-            text.tag_config("added",       font=FONT_MONO,        foreground=GREEN)
-            text.tag_config("removed",     font=FONT_MONO,        foreground=RED)
-            text.tag_config("updated",     font=FONT_MONO,        foreground=YELLOW)
-            text.tag_config("dim",         font=FONT_MONO,        foreground=TEXT_DIM)
-            text.tag_config("placeholder", font=FONT_MONO_ITALIC, foreground=TEXT_DIM)
+            text.tag_config("section_added",   font=FONT_BOLD,        foreground=GREEN)
+            text.tag_config("section_removed", font=FONT_BOLD,        foreground=RED)
+            text.tag_config("section_updated", font=FONT_BOLD,        foreground=YELLOW)
+            text.tag_config("added",           font=FONT_MONO,        foreground=GREEN)
+            text.tag_config("removed",         font=FONT_MONO,        foreground=RED)
+            text.tag_config("updated",         font=FONT_MONO,        foreground=YELLOW)
+            text.tag_config("dim",             font=FONT_MONO,        foreground=TEXT_DIM)
+            text.tag_config("placeholder",     font=FONT_MONO_ITALIC, foreground=TEXT_DIM)
 
             text.config(state="normal")
 
-            text.insert("end", "Added\n", "section")
+            text.insert("end", "Added\n", "section_added")
             text.insert("end", "\n")
             if changes["added"]:
                 for _, entry in changes["added"]:
@@ -910,7 +1023,7 @@ class UpdaterApp(tk.Tk):
                 text.insert("end", "  No mods added.\n", "placeholder")
             text.insert("end", "\n")
 
-            text.insert("end", "Removed\n", "section")
+            text.insert("end", "Removed\n", "section_removed")
             text.insert("end", "\n")
             if changes["removed"]:
                 for _, entry in changes["removed"]:
@@ -919,12 +1032,11 @@ class UpdaterApp(tk.Tk):
                 text.insert("end", "  No mods removed.\n", "placeholder")
             text.insert("end", "\n")
 
-            text.insert("end", "Updated\n", "section")
+            text.insert("end", "Updated\n", "section_updated")
             text.insert("end", "\n")
             if changes["updated"]:
-                for _, old_entry, new_entry in changes["updated"]:
-                    text.insert("end", f"  - {new_entry['name']}", "updated")
-                    text.insert("end", f"  ({old_entry['file']} → {new_entry['file']})\n", "dim")
+                for _, _, new_entry in changes["updated"]:
+                    text.insert("end", f"  - {new_entry['name']}\n", "updated")
             else:
                 text.insert("end", "  No mods updated.\n", "placeholder")
 
@@ -932,7 +1044,7 @@ class UpdaterApp(tk.Tk):
 
             button_row = tk.Frame(frame, bg=DARK_BG)
             button_row.pack(fill="x", padx=20, pady=12)
-            self._secondary_button(button_row, "Cancel", self.destroy).pack(side="right", padx=(10, 0))
+            self._secondary_button(button_row, "Cancel", self._on_close).pack(side="right", padx=(10, 0))
             self._secondary_button(
                 button_row, "←  Back", self._show_version_options,
             ).pack(side="right", padx=(10, 0))
@@ -948,14 +1060,16 @@ class UpdaterApp(tk.Tk):
         def build() -> tk.Frame:
             frame = tk.Frame(self, bg=DARK_BG)
             from_label = (
-                f"v{self.local_version or '?'}" if not self.fresh_install else "fresh"
+                f"v{self.local_version or '?'}" if not self.fresh_install else "fresh install"
             )
             self._header(frame, subtitle=f"{from_label}  →  v{self.target_version}")
             self._progress_var.set("Starting…")
-            tk.Label(
+            progress_label = tk.Label(
                 frame, textvariable=self._progress_var,
                 font=FONT_BODY, bg=DARK_BG, fg=TEXT, pady=8,
-            ).pack(fill="x", padx=20)
+            )
+            progress_label.pack(fill="x", padx=20)
+            self._update_progress_label = progress_label
 
             log_frame = tk.Frame(frame, bg=PANEL_BG)
             log_frame.pack(fill="both", expand=True, padx=20, pady=(0, 10))
@@ -969,19 +1083,32 @@ class UpdaterApp(tk.Tk):
             )
             log_text.pack(fill="both", expand=True)
             scrollbar.config(command=log_text.yview)
+            log_text.tag_config("log_add",      foreground=GREEN,   font=FONT_MONO)
+            log_text.tag_config("log_update",   foreground=YELLOW,  font=FONT_MONO)
+            log_text.tag_config("log_remove",   foreground=RED,     font=FONT_MONO)
+            log_text.tag_config("log_download", foreground=TEXT,    font=FONT_MONO)
+            log_text.tag_config("log_warn",     foreground=YELLOW,  font=FONT_MONO)
+            log_text.tag_config("log_error",    foreground=RED,     font=FONT_MONO)
+            log_text.tag_config("log_version",  foreground=ACCENT,  font=FONT_MONO)
             self._log_text = log_text
+
+            button_row = tk.Frame(frame, bg=DARK_BG)
+            button_row.pack(fill="x", padx=20, pady=12)
+            self._update_button_row = button_row
             return frame
         self._swap_frame(build)
         threading.Thread(target=self._run_update, daemon=True).start()
 
-    def _log(self, message: str) -> None:
+    def _log(self, message: str, tag: str = "") -> None:
         log_text = self._log_text
         if log_text is None:
             return
         def append() -> None:
+            at_bottom = log_text.yview()[1] >= 0.99
             log_text.config(state="normal")
-            log_text.insert("end", message + "\n")
-            log_text.see("end")
+            log_text.insert("end", message + "\n", tag or ())
+            if at_bottom:
+                log_text.see("end")
             log_text.config(state="disabled")
         self.after(0, append)
 
@@ -999,7 +1126,7 @@ class UpdaterApp(tk.Tk):
 
             downloads = self.update_plan["download"]
             deletions = self.update_plan["delete"]
-            downloaded_files: list[tuple[Path, str]] = []
+            downloaded_files: list[tuple[Path, str, bool]] = []
             failed_downloads: list[str] = []
 
             # Phase 0 (fresh install only): wipe all existing mod files
@@ -1011,9 +1138,9 @@ class UpdaterApp(tk.Tk):
                         for existing_file in list(category_dir.iterdir()):
                             try:
                                 existing_file.unlink()
-                                self._log(f"  ✗ {existing_file.name}")
+                                self._log(f"  - {existing_file.name}", "log_remove")
                             except OSError as exc:
-                                self._log(f"  [warn] could not delete {existing_file.name}: {exc}")
+                                self._log(f"  [warn] could not delete {existing_file.name}: {exc}", "log_warn")
 
             # Phase 1: download all new/updated files concurrently
             completed_count = 0
@@ -1022,11 +1149,11 @@ class UpdaterApp(tk.Tk):
                 self._set_progress(f"Downloading 0 / {len(downloads)}…")
             with ThreadPoolExecutor(max_workers=5) as executor:
                 future_map = {
-                    executor.submit(download_mod_file, project_id, file_id, tmp_dir): (project_id, display_name)
-                    for project_id, file_id, display_name in downloads
+                    executor.submit(download_mod_file, project_id, file_id, tmp_dir): (project_id, display_name, is_update)
+                    for project_id, file_id, display_name, is_update in downloads
                 }
                 for future in as_completed(future_map):
-                    _, display_name = future_map[future]
+                    _, display_name, is_update = future_map[future]
                     local_path = future.result()
                     with count_lock:
                         completed_count += 1
@@ -1034,16 +1161,16 @@ class UpdaterApp(tk.Tk):
                     self._set_progress(f"Downloading {count} / {len(downloads)}…")
                     if local_path is None:
                         failed_downloads.append(display_name)
-                        self._log(f"  [FAIL] {display_name}")
+                        self._log(f"  [FAIL] {display_name}", "log_error")
                         continue
                     category = classify_downloaded_file(local_path)
-                    downloaded_files.append((local_path, category))
-                    self._log(f"  ↓ {display_name}")
+                    downloaded_files.append((local_path, category, is_update))
+                    self._log(f"  ↓ {display_name}", "log_download")
 
             if failed_downloads:
                 self._log("")
-                self._log(f"[ERROR] {len(failed_downloads)} file(s) failed to download.")
-                self._log("        Your modpack was not modified.")
+                self._log(f"[ERROR] {len(failed_downloads)} file(s) failed to download.", "log_error")
+                self._log("        Your modpack was not modified.", "log_error")
                 self.after(0, lambda: self._show_outcome(
                     success=False,
                     message=(
@@ -1061,13 +1188,13 @@ class UpdaterApp(tk.Tk):
                 for old_path, display_name in deletions:
                     try:
                         old_path.unlink()
-                        self._log(f"  ✗ {display_name}")
+                        self._log(f"  - {display_name}", "log_remove")
                     except OSError as exc:
-                        self._log(f"  [warn] could not delete {display_name}: {exc}")
+                        self._log(f"  [warn] could not delete {display_name}: {exc}", "log_warn")
 
             # Phase 3: move downloaded files into place
             self._set_progress("Installing files…")
-            for tmp_path, category in downloaded_files:
+            for tmp_path, category, is_update in downloaded_files:
                 dest_dir = self.modpack_dir / category
                 dest_dir.mkdir(parents=True, exist_ok=True)
                 destination = dest_dir / tmp_path.name
@@ -1075,9 +1202,10 @@ class UpdaterApp(tk.Tk):
                     destination.unlink()
                 try:
                     shutil.move(str(tmp_path), str(destination))
-                    self._log(f"  + {destination.name}")
+                    icon = "~" if is_update else "+"
+                    self._log(f"  {icon} {destination.name}", "log_update" if is_update else "log_add")
                 except OSError as exc:
-                    self._log(f"  [warn] could not install {tmp_path.name}: {exc}")
+                    self._log(f"  [warn] could not install {tmp_path.name}: {exc}", "log_warn")
 
             # Phase 4: record the new version last so a crash mid-update
             # leaves modpack_version.txt pointing at the old version.
@@ -1085,7 +1213,7 @@ class UpdaterApp(tk.Tk):
                 self.target_version, encoding="utf-8",
             )
             self._log("")
-            self._log(f"modpack_version.txt → {self.target_version}")
+            self._log(f"modpack_version.txt → {self.target_version}", "log_version")
 
             self.after(0, lambda: self._show_outcome(
                 success=True,
@@ -1101,27 +1229,40 @@ class UpdaterApp(tk.Tk):
     # ---- screen: outcome (success or error) ----
 
     def _show_outcome(self, success: bool, message: str) -> None:
-        def build() -> tk.Frame:
-            frame = tk.Frame(self, bg=DARK_BG)
-            self._header(frame)
-            body = tk.Frame(frame, bg=DARK_BG, padx=20, pady=40)
-            body.pack(fill="both", expand=True)
-            icon  = "✓" if success else "✗"
-            color = ACCENT if success else RED
-            tk.Label(
-                body, text=icon,
-                font=("Consolas", 32, "bold"), bg=DARK_BG, fg=color,
-            ).pack(pady=(0, 8))
-            tk.Label(
-                body, text=message,
-                font=FONT_BODY, bg=DARK_BG, fg=TEXT,
-                wraplength=560, justify="center",
-            ).pack()
-            button_row = tk.Frame(frame, bg=DARK_BG)
-            button_row.pack(fill="x", padx=20, pady=12)
-            self._primary_button(button_row, "Close", self.destroy).pack(side="right")
-            return frame
-        self._swap_frame(build)
+        colour = ACCENT if success else RED
+        if self._update_button_row is not None:
+            # Inline result on the download screen — just update the progress label
+            # and add a Finish button; don't navigate away.
+            self._set_progress(message)
+            progress_label  = self._update_progress_label
+            button_row      = self._update_button_row
+            if progress_label is not None:
+                self.after(0, lambda: progress_label.config(fg=colour))
+            def add_finish_button() -> None:
+                self._primary_button(button_row, "Finish", self._on_close).pack(side="right")
+            self.after(0, add_finish_button)
+        else:
+            # Pre-update error (network failure, bad snapshot, etc.) — show outcome screen.
+            def build() -> tk.Frame:
+                frame = tk.Frame(self, bg=DARK_BG)
+                self._header(frame)
+                body = tk.Frame(frame, bg=DARK_BG, padx=20, pady=40)
+                body.pack(fill="both", expand=True)
+                icon = "✓" if success else "✗"
+                tk.Label(
+                    body, text=icon,
+                    font=("Consolas", 32, "bold"), bg=DARK_BG, fg=colour,
+                ).pack(pady=(0, 8))
+                tk.Label(
+                    body, text=message,
+                    font=FONT_BODY, bg=DARK_BG, fg=TEXT,
+                    wraplength=560, justify="center",
+                ).pack()
+                button_row = tk.Frame(frame, bg=DARK_BG)
+                button_row.pack(fill="x", padx=20, pady=12)
+                self._primary_button(button_row, "Close", self._on_close).pack(side="right")
+                return frame
+            self._swap_frame(build)
 
 
 # -------------------------

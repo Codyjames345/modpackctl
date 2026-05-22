@@ -836,12 +836,10 @@ def changelog(v1: str, v2: str | None, out: str = "changelog.md", message: str =
     lines.append("## 🔄 Updated")
     if changes["updated"]:
         updated_list = sorted(changes["updated"])
-        for index, (project_id, old_file_id, new_file_id) in enumerate(updated_list, 1):
-            mod_name      = resolve_mod(project_id)
-            old_file_name = resolve_file_name(project_id, old_file_id)
-            new_file_name = resolve_file_name(project_id, new_file_id)
-            print(f"  [~] {mod_name}: {old_file_name} → {new_file_name} ({index}/{len(updated_list)})")
-            lines.append(f"- {mod_name}  _({old_file_name} → {new_file_name})_")
+        for index, (project_id, *_) in enumerate(updated_list, 1):
+            mod_name = resolve_mod(project_id)
+            print(f"  [~] {mod_name} ({index}/{len(updated_list)})")
+            lines.append(f"- {mod_name}")
     else:
         lines.append("_No mods updated._")
 
@@ -1281,6 +1279,7 @@ def publish(version: str, message: str = "") -> None:
         print("[WARN] releases/client-updater.py not found — not uploading updater.")
 
     print(f"Creating GitHub Release {tag}...")
+    release_ok = False
     try:
         subprocess.run(
             [
@@ -1293,18 +1292,20 @@ def publish(version: str, message: str = "") -> None:
             check=True,
         )
         print(f"[OK] GitHub Release {tag} created.")
+        release_ok = True
     except subprocess.CalledProcessError:
         print("[ERROR] 'gh release create' failed.")
-        print("       Make sure the GitHub CLI is installed: https://cli.github.com")
-        print("       And that you're authenticated: gh auth login")
-        sys.exit(1)
+        print("        Make sure the GitHub CLI is installed: https://cli.github.com")
+        print("        And that you're authenticated: gh auth login")
     finally:
         notes_path.unlink(missing_ok=True)
 
     print("Pushing versions.json + snapshots to gh-pages...")
+    pages_ok = True
     try:
         _push_pages_assets()
     except Exception:
+        pages_ok = False
         print("[WARN] Could not update gh-pages. Players won't see this version in the updater.")
         print("       Run 'python modpackctl.py build-pages' to generate the files locally,")
         print("       then push them to the gh-pages branch manually.")
@@ -1313,12 +1314,15 @@ def publish(version: str, message: str = "") -> None:
     release_url = f"https://github.com/{user}/{repo}/releases/tag/{tag}"
 
     print(f"\n{'=' * 42}")
-    print(f" PUBLISH COMPLETE — v{version}")
+    if release_ok and pages_ok:
+        print(f" PUBLISH COMPLETE — v{version}")
+    else:
+        print(f" PUBLISH PARTIAL — v{version} (see errors above)")
     print(f"{'=' * 42}")
-    print(f"  Release URL : {release_url}")
+    if release_ok:
+        print(f"  Release URL : {release_url}")
     print(f"  gh-pages    : {pages_url}")
     print(f"{'=' * 42}\n")
-    print("[OK] Done. Share the release URL with your players.")
     print("     New players: download the zip from the release page.")
     print("     Existing players: run client-updater.py from their current install.")
 
