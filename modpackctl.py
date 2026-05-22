@@ -117,7 +117,7 @@ def load_json(path: Path, default: _JsonT) -> _JsonT:
     return default
 
 
-def save_json(path: Path, data: list | dict) -> None:
+def save_json(path: Path, data: _JsonT) -> None:
     """Write data as indented JSON to path, creating parent directories as needed."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2))
@@ -1301,6 +1301,16 @@ def publish(version: str, message: str = "") -> None:
     print("     Existing players: run client-updater.py from their current install.")
 
 
+def bake_updater() -> None:
+    """Write a pre-configured client-updater.py to releases/, substituting credentials from modpackctl.toml."""
+    RELEASES.mkdir(parents=True, exist_ok=True)
+    baked_path = RELEASES / UPDATE_SCRIPT.name
+    if _bake_updater_script(baked_path):
+        print(f"[OK] Baked {baked_path}")
+    else:
+        sys.exit(1)
+
+
 # -------------------------
 # CACHE MAINTENANCE
 # -------------------------
@@ -1395,6 +1405,7 @@ Commands:
   publish       <version> [--message "..."]        Build client release + push to GitHub
   update        <version> [--client|--server]      Rebuild the build folder for a version
   purge         [--all]                            Remove old files from the download cache
+  bake-updater                                    Write a pre-configured client-updater.py to releases/
   export-example                                  Write modpackctl.toml.example from the built-in defaults
 """.strip()
 
@@ -1482,6 +1493,9 @@ if __name__ == "__main__":
 
     elif cmd == "purge":
         purge_cache("--all" in sys.argv)
+
+    elif cmd == "bake-updater":
+        bake_updater()
 
     elif cmd == "export-example":
         example_path = Path("modpackctl.toml.example")
