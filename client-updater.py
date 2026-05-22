@@ -117,38 +117,12 @@ def fetch_versions() -> dict:
 
 
 def fetch_snapshot(commit_id: str) -> dict:
-    """Fetch a snapshot from gh-pages and return it in enriched form."""
+    """Fetch a snapshot from gh-pages."""
     url = (
         f"https://raw.githubusercontent.com/{GITHUB_USER}/{GITHUB_REPO}"
         f"/gh-pages/snapshots/{commit_id}.json"
     )
-    return normalize_snapshot(fetch_json(url))
-
-
-def normalize_snapshot(data: dict) -> dict:
-    """
-    Accept either the legacy flat snapshot ({pid: fid}) or the enriched form
-    ({pid: {file_id, name, file, category}}) and return the enriched form.
-    Missing fields default to sane values so the rest of the code can rely
-    on a uniform shape.
-    """
-    normalized: dict = {}
-    for project_id, value in data.items():
-        if isinstance(value, dict):
-            normalized[project_id] = {
-                "file_id":  str(value.get("file_id", "")),
-                "name":     value.get("name") or project_id,
-                "file":     value.get("file", ""),
-                "category": value.get("category", "mods"),
-            }
-        else:
-            normalized[project_id] = {
-                "file_id":  str(value),
-                "name":     project_id,
-                "file":     "",
-                "category": "mods",
-            }
-    return normalized
+    return fetch_json(url)
 
 
 # -------------------------

@@ -126,6 +126,11 @@ modpackctl.toml     — your config (not committed)
 
 ## GitHub Pages Integration
 
-`publish` maintains a `gh-pages` branch with `versions.json` at the repo root. `client-updater.py` reads this file to discover available versions and the commit hash needed to fetch the corresponding mod snapshot.
+`publish` maintains a `gh-pages` branch with two things:
+
+- `versions.json` — lists every released version and its commit hash
+- `snapshots/{commit}.json` — an enriched mod list for each version (mod names, filenames, categories)
+
+`client-updater.py` fetches `versions.json` to find the latest version, then fetches the two relevant snapshots to compute what changed since the player's current version.
 
 The branch is created automatically as an orphan on first publish.

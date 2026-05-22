@@ -473,14 +473,19 @@ def get_log_entry(version: str) -> dict | None:
 # -------------------------
 
 
+def _snapshot_file_id(value: dict | str) -> str:
+    """Return the file_id from a snapshot entry (dict with file_id key, or a bare string)."""
+    return str(value["file_id"] if isinstance(value, dict) else value)
+
+
 def diff(old: dict, new: dict) -> dict:
     """
     Compute the difference between two mod state dicts.
     Returns a dict with keys 'added' (set), 'removed' (set), and
     'updated' (list of (project_id, old_file_id, new_file_id) tuples).
     """
-    old = {str(k): str(v) for k, v in old.items()}
-    new = {str(k): str(v) for k, v in new.items()}
+    old = {str(k): _snapshot_file_id(v) for k, v in old.items()}
+    new = {str(k): _snapshot_file_id(v) for k, v in new.items()}
 
     added   = new.keys() - old.keys()
     removed = old.keys() - new.keys()
@@ -929,6 +934,20 @@ def update(
         }
     save_index(index)
 
+    # Update the snapshot with full metadata for every mod we just built.
+    # Excluded and failed mods keep their existing snapshot entry.
+    if successful_results:
+        cache_data = load_json(CACHE, {})
+        for result in successful_results:
+            project_id = result["project_id"]
+            snapshot[project_id] = {
+                "file_id":  result["file_id"],
+                "name":     cache_data.get(project_id, {}).get("name") or project_id,
+                "file":     result["file"],
+                "category": result["category"],
+            }
+        save_snapshot(commit_id, snapshot)
+
     (BUILD / "modpack_version.txt").write_text(version)
 
     ok      = downloaded + cached
@@ -1072,39 +1091,6 @@ def _build_versions_json() -> dict:
     }
 
 
-def _build_enriched_snapshot(commit_id: str) -> dict:
-    """
-    Build an enriched snapshot for player updater consumption, of the form
-    {project_id: {file_id, name, file, category}}. Resolves any missing mod
-    names from the CurseForge API via the local cache.
-    """
-    raw_snapshot = load_snapshot(commit_id)
-    if not raw_snapshot:
-        return {}
-
-    file_lookups = {project_id: {file_id} for project_id, file_id in raw_snapshot.items()}
-    _prefetch_names(set(raw_snapshot.keys()), file_lookups)
-
-    cache_data = load_json(CACHE, {})
-    index_data = load_index()
-
-    enriched_snapshot: dict = {}
-    for project_id, file_id in raw_snapshot.items():
-        cache_entry = cache_data.get(project_id, {})
-        index_entry = index_data.get(project_id, {})
-        snapshot_entry = {
-            "file_id":  file_id,
-            "name":     cache_entry.get("name") or project_id,
-            "file":     cache_entry.get("files", {}).get(file_id, ""),
-            "category": "mods",
-        }
-        if index_entry.get("file_id") == file_id and index_entry.get("category"):
-            snapshot_entry["category"] = index_entry["category"]
-        enriched_snapshot[project_id] = snapshot_entry
-
-    return enriched_snapshot
-
-
 def _get_notes_file_for_release(version: str, message: str = "") -> Path:
     """
     Generate a temporary Markdown changelog file for the given version.
@@ -1130,9 +1116,8 @@ def _get_notes_file_for_release(version: str, message: str = "") -> Path:
 
 def _write_pages_assets(dest: Path) -> None:
     """
-    Write versions.json and the snapshots/ tree into dest, with enriched snapshots
-    suitable for player updater consumption. Skips snapshots that already exist
-    in dest (snapshots are immutable per commit).
+    Write versions.json and the snapshots/ tree into dest.
+    Skips snapshots that already exist in dest (snapshots are immutable per commit).
     """
     versions_payload = _build_versions_json()
     (dest / "versions.json").write_text(json.dumps(versions_payload, indent=2))
@@ -1151,7 +1136,7 @@ def _write_pages_assets(dest: Path) -> None:
 
 def _push_pages_assets() -> None:
     """
-    Push versions.json and enriched snapshots to the gh-pages branch, creating
+    Push versions.json and snapshots to the gh-pages branch, creating
     the branch as an orphan if it does not yet exist. Uses a temporary git
     worktree to avoid switching the working branch.
     """
