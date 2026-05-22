@@ -1,0 +1,12 @@
+[github]
+user = "<yourName>"
+repo = "<yourRepo>"
+
+[settings]
+modpack_prefix = "<YourModpackName>"
+
+# List project IDs to exclude from client releases (server-side only mods)
+server_only = []
+
+# List project IDs to exclude from server releases (client-side only mods)
+client_only = []

@@ -1,0 +1,14 @@
+# Ignore built modpacks
+/releases/
+
+# Ignore build folder
+/build/
+
+# Ignore working files
+/.modpackctl/
+
+# Ignore zip files in root
+/*.zip
+
+# Ignore pre-populated config file
+/modpackctl.toml
