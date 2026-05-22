@@ -870,11 +870,12 @@ def update(
         print(f"[ERROR] Version '{version}' not found.")
         return {"downloaded": 0, "cached": 0, "failed": 0, "ok": 0}
 
-    snapshot      = load_snapshot(commit_id)
+    snapshot       = load_snapshot(commit_id)
+    snapshot_ids   = {project_id: _snapshot_file_id(val) for project_id, val in snapshot.items()}
     existing_index = load_index()
-    mods_to_build = {
+    mods_to_build  = {
         project_id: file_id
-        for project_id, file_id in snapshot.items()
+        for project_id, file_id in snapshot_ids.items()
         if project_id not in excluded_ids
         and (
             not exclude_categories
@@ -1144,8 +1145,8 @@ def _write_pages_assets(dest: Path) -> None:
         snapshot_out = snapshots_dir / f"{commit_id}.json"
         if snapshot_out.exists():
             continue
-        enriched = _build_enriched_snapshot(commit_id)
-        snapshot_out.write_text(json.dumps(enriched, indent=2))
+        snapshot_data = load_snapshot(commit_id)
+        snapshot_out.write_text(json.dumps(snapshot_data, indent=2))
 
 
 def _push_pages_assets() -> None:
@@ -1280,21 +1281,21 @@ def publish(version: str, message: str = "") -> None:
     finally:
         notes_path.unlink(missing_ok=True)
 
-    print("Updating versions.json on gh-pages...")
+    print("Pushing versions.json + snapshots to gh-pages...")
     try:
         _push_pages_assets()
     except Exception:
         print("[WARN] Could not update gh-pages. Players won't see this version in the updater.")
-        print("       You may need to push versions.json manually.")
+        print("       You may need to push versions.json and snapshots/ manually.")
 
-    pages_url   = f"https://{user}.github.io/{repo}/versions.json"
+    pages_url   = f"https://{user}.github.io/{repo}/"
     release_url = f"https://github.com/{user}/{repo}/releases/tag/{tag}"
 
     print(f"\n{'=' * 42}")
     print(f" PUBLISH COMPLETE — v{version}")
     print(f"{'=' * 42}")
-    print(f"  Release URL  : {release_url}")
-    print(f"  versions.json: {pages_url}")
+    print(f"  Release URL : {release_url}")
+    print(f"  gh-pages    : {pages_url}")
     print(f"{'=' * 42}\n")
     print("[OK] Done. Share the release URL with your players.")
     print("     New players: download the zip from the release page.")
