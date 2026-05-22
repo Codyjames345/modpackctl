@@ -6,7 +6,7 @@ A lightweight CLI for managing a CurseForge modpack across versions, with git-ba
 
 `modpackctl.py` is the pack maintainer's tool. It tracks mod versions by importing CurseForge export zips, generates changelogs, builds client and server release zips, and publishes them to GitHub with a single command.
 
-`update.py` ships alongside the release zip. Players double-click it to check for updates and apply them without re-downloading the entire modpack.
+`client-updater.py` ships alongside the release zip. Players double-click it to check for updates and apply them without re-downloading the entire modpack.
 
 ## Prerequisites
 
@@ -69,7 +69,7 @@ python modpackctl.py publish 1.2.0 --message "Improved performance and fixed cra
 | `log` | List all committed versions with diff stats. |
 | `changelog <v1> [output.md]` | Generate a changelog for `v1` as an initial release. |
 | `changelog <v1> <v2> [output.md]` | Generate a changelog between two versions. |
-| `release <version> [--client\|--server]` | Build a release zip. Without a flag, includes all mods. |
+| `release <version> [--client\|--server]` | Build a release zip. `--client` also produces a baked `releases/client-updater.py`. Without a flag, includes all mods. |
 | `publish <version> [--message "..."]` | Build a client release, create a GitHub Release, and push `versions.json` to `gh-pages`. |
 | `update <version> [--client\|--server]` | Rebuild the `build/` folder for a version without zipping. |
 | `purge [--all]` | Remove stale files from the download cache. Without `--all`, only removes mods not in the latest snapshot. |
@@ -86,18 +86,27 @@ Versions follow `major.minor.patch`. The next version is calculated automaticall
 
 ## Player Updater
 
-`update.py` is a standalone Tkinter GUI that players keep in their modpack root folder (alongside `mods/`) and double-click whenever they want to update. It:
+`client-updater.py` is a standalone Tkinter GUI. Players can save it anywhere (Desktop, Downloads, etc.) and double-click it to update their modpack — the script asks for the modpack folder rather than needing to live inside it.
 
-1. Fetches `versions.json` from GitHub Pages to find the latest version
-2. Compares the player's `modpack_version.txt` against the latest snapshot
-3. Downloads only changed mods — additions, removals, and updates
+The flow:
 
-**Distribution:** `publish` uploads two assets to the GitHub Release: the modpack zip and a pre-configured `update.py` with your repo details already embedded.
+1. **Folder picker** — autodetects a likely `.minecraft` folder and remembers the last choice between runs.
+2. **Checking** — fetches `versions.json` and the relevant snapshots from GitHub Pages.
+3. **Changelog** — shows the player exactly what will be added, removed, and updated, by mod name.
+4. **Confirm & Update** — explicit click before any files are touched.
+5. **Atomic install** — all new files download to a temp folder first; if anything fails the install is left untouched.
+6. **Outcome** — clear success/error summary.
 
-- **New players** — download and extract the zip, then download `update.py` into the same folder.
-- **Existing players** — already have `update.py`; just run it to update.
+**Generating client-updater.py:** Running `release --client` (or `publish`) reads your `modpackctl.toml` and substitutes your GitHub username and repo name into `client-updater.py`, writing the result to `releases/client-updater.py`. This is the file players download — it is pre-configured for your repo and requires no setup on their end.
 
-**Requirements for players:** Python 3.8+ and an internet connection. No extra packages needed; `update.py` uses only the standard library.
+**Distribution:** `publish` uploads two assets to the GitHub Release: the modpack zip and the pre-configured `releases/client-updater.py`. `publish` also pushes enriched snapshots (with mod names) to the `gh-pages` branch so the changelog displays real names like "Sodium" instead of project IDs.
+
+- **New players** — download and extract the modpack zip, then download `client-updater.py` (save it anywhere).
+- **Existing players** — re-run their saved `client-updater.py`; the prefs file remembers the modpack folder.
+
+**Player prefs:** the last-selected modpack folder is saved to `~/.modpack-updater/` (namespaced per modpack).
+
+**Requirements for players:** Python 3.8+ and an internet connection. No extra packages needed; `client-updater.py` uses only the standard library.
 
 ## Repository Layout
 
@@ -116,6 +125,6 @@ modpackctl.toml     — your config (not committed)
 
 ## GitHub Pages Integration
 
-`publish` maintains a `gh-pages` branch with `versions.json` at the repo root. `update.py` reads this file to discover available versions and the commit hash needed to fetch the corresponding mod snapshot.
+`publish` maintains a `gh-pages` branch with `versions.json` at the repo root. `client-updater.py` reads this file to discover available versions and the commit hash needed to fetch the corresponding mod snapshot.
 
 The branch is created automatically as an orphan on first publish.

@@ -35,8 +35,9 @@ DL_CACHE        = REPO / "dl_cache"          # permanent jar store keyed by (pro
 OVERRIDES_STORE = REPO / "overrides"
 CONFIG_FILE     = Path("modpackctl.toml")
 
-BUILD    = Path("build")
-RELEASES = Path("releases")
+BUILD         = Path("build")
+RELEASES      = Path("releases")
+UPDATE_SCRIPT = Path("client-updater.py")
 
 CF_URL  = "https://api.cfwidget.com/{}"
 HEADERS = {"User-Agent": "modpackctl/1.0"}
@@ -1011,13 +1012,18 @@ def release(
 
 
 def release_client(version: str) -> Path | None:
-    """Build a client release zip, excluding any mods in the server_only list."""
+    """Build a client release zip, excluding any mods in the server_only list, and bake client-updater.py."""
     excluded = get_filter_list("server_only")
     if not excluded:
         print("[WARN] No server_only list found in config — building full release.")
     else:
         print(f"[INFO] Excluding {len(excluded)} server-only mod(s).")
-    return release(version, exclude=excluded, suffix="client")
+    zip_path = release(version, exclude=excluded, suffix="client")
+    if zip_path:
+        baked_path = RELEASES / "client-updater.py"
+        if _bake_updater_script(baked_path):
+            print(f"[OK] Baked client-updater.py → {baked_path}")
+    return zip_path
 
 
 def release_server(version: str) -> Path | None:
@@ -1035,6 +1041,24 @@ def release_server(version: str) -> Path | None:
 # -------------------------
 
 
+def _bake_updater_script(dest_path: Path) -> bool:
+    """
+    Substitute __GITHUB_USER__ and __GITHUB_REPO__ in client-updater.py with the values
+    from modpackctl.toml, writing the result to dest_path.
+    Returns False if client-updater.py is not present in the project root.
+    """
+    if not UPDATE_SCRIPT.exists():
+        print(f"[WARN] {UPDATE_SCRIPT} not found — skipping updater bake.")
+        return False
+    user, repo = get_github_info()
+    content = UPDATE_SCRIPT.read_text(encoding="utf-8")
+    content = content.replace('"__GITHUB_USER__"', f'"{user}"')
+    content = content.replace('"__GITHUB_REPO__"', f'"{repo}"')
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    dest_path.write_text(content, encoding="utf-8")
+    return True
+
+
 def _build_versions_json() -> dict:
     """Build the versions.json payload served from gh-pages for the player updater."""
     log = load_log()
@@ -1045,6 +1069,39 @@ def _build_versions_json() -> dict:
             for entry in log
         ],
     }
+
+
+def _build_enriched_snapshot(commit_id: str) -> dict:
+    """
+    Build an enriched snapshot for player updater consumption, of the form
+    {project_id: {file_id, name, file, category}}. Resolves any missing mod
+    names from the CurseForge API via the local cache.
+    """
+    raw_snapshot = load_snapshot(commit_id)
+    if not raw_snapshot:
+        return {}
+
+    file_lookups = {project_id: {file_id} for project_id, file_id in raw_snapshot.items()}
+    _prefetch_names(set(raw_snapshot.keys()), file_lookups)
+
+    cache_data = load_json(CACHE, {})
+    index_data = load_index()
+
+    enriched_snapshot: dict = {}
+    for project_id, file_id in raw_snapshot.items():
+        cache_entry = cache_data.get(project_id, {})
+        index_entry = index_data.get(project_id, {})
+        snapshot_entry = {
+            "file_id":  file_id,
+            "name":     cache_entry.get("name") or project_id,
+            "file":     cache_entry.get("files", {}).get(file_id, ""),
+            "category": "mods",
+        }
+        if index_entry.get("file_id") == file_id and index_entry.get("category"):
+            snapshot_entry["category"] = index_entry["category"]
+        enriched_snapshot[project_id] = snapshot_entry
+
+    return enriched_snapshot
 
 
 def _get_notes_file_for_release(version: str, message: str = "") -> Path:
@@ -1070,15 +1127,33 @@ def _get_notes_file_for_release(version: str, message: str = "") -> Path:
     return notes_path
 
 
-def _ensure_gh_pages_has_versions_json() -> None:
+def _write_pages_assets(dest: Path) -> None:
     """
-    Push an updated versions.json to the gh-pages branch, creating the branch
-    as an orphan if it does not yet exist. Uses a temporary git worktree to
-    avoid switching the working branch.
+    Write versions.json and the snapshots/ tree into dest, with enriched snapshots
+    suitable for player updater consumption. Skips snapshots that already exist
+    in dest (snapshots are immutable per commit).
     """
-    tmp_path = Path(".modpackctl_versions_tmp.json")
-    tmp_path.write_text(json.dumps(_build_versions_json(), indent=2))
+    versions_payload = _build_versions_json()
+    (dest / "versions.json").write_text(json.dumps(versions_payload, indent=2))
 
+    snapshots_dir = dest / "snapshots"
+    snapshots_dir.mkdir(parents=True, exist_ok=True)
+
+    for log_entry in load_log():
+        commit_id    = log_entry["commit"]
+        snapshot_out = snapshots_dir / f"{commit_id}.json"
+        if snapshot_out.exists():
+            continue
+        enriched = _build_enriched_snapshot(commit_id)
+        snapshot_out.write_text(json.dumps(enriched, indent=2))
+
+
+def _push_pages_assets() -> None:
+    """
+    Push versions.json and enriched snapshots to the gh-pages branch, creating
+    the branch as an orphan if it does not yet exist. Uses a temporary git
+    worktree to avoid switching the working branch.
+    """
     try:
         ls_result     = subprocess.run(
             ["git", "ls-remote", "--heads", "origin", "gh-pages"],
@@ -1090,9 +1165,9 @@ def _ensure_gh_pages_has_versions_json() -> None:
             print("[INFO] Creating gh-pages branch...")
             subprocess.run(["git", "checkout", "--orphan", "gh-pages"], check=True)
             subprocess.run(["git", "rm", "-rf", "--cached", "."], check=True, capture_output=True)
-            shutil.copy(tmp_path, "versions.json")
-            subprocess.run(["git", "add", "versions.json"], check=True)
-            subprocess.run(["git", "commit", "-m", "init: versions.json"], check=True)
+            _write_pages_assets(Path("."))
+            subprocess.run(["git", "add", "versions.json", "snapshots"], check=True)
+            subprocess.run(["git", "commit", "-m", "init: versions.json + snapshots"], check=True)
             subprocess.run(["git", "push", "-u", "origin", "gh-pages"], check=True)
             subprocess.run(["git", "checkout", "-"], check=True)
         else:
@@ -1119,22 +1194,22 @@ def _ensure_gh_pages_has_versions_json() -> None:
                 check=True, capture_output=True,
             )
 
-            shutil.copy(tmp_path, worktree_path / "versions.json")
-            subprocess.run(["git", "add", "versions.json"], check=True, cwd=worktree_path)
+            _write_pages_assets(worktree_path)
+            subprocess.run(["git", "add", "versions.json", "snapshots"], check=True, cwd=worktree_path)
 
             try:
                 subprocess.run(
-                    ["git", "commit", "-m", "chore: update versions.json"],
+                    ["git", "commit", "-m", "chore: update versions.json + snapshots"],
                     check=True, capture_output=True, text=True, cwd=worktree_path,
                 )
                 subprocess.run(
                     ["git", "push", "origin", "HEAD:gh-pages"],
                     check=True, cwd=worktree_path,
                 )
-                print("[INFO] versions.json updated on gh-pages.")
+                print("[INFO] versions.json + snapshots updated on gh-pages.")
             except subprocess.CalledProcessError as exc:
                 if "nothing to commit" in (exc.stdout or "") or "nothing to commit" in (exc.stderr or ""):
-                    print("[INFO] versions.json is already up to date.")
+                    print("[INFO] versions.json + snapshots are already up to date.")
                 else:
                     raise
 
@@ -1143,15 +1218,13 @@ def _ensure_gh_pages_has_versions_json() -> None:
             )
             subprocess.run(["git", "branch", "-D", "gh-pages-temp"], capture_output=True)
 
-        print("[OK] versions.json pushed to gh-pages.")
+        print("[OK] versions.json + snapshots pushed to gh-pages.")
     except subprocess.CalledProcessError as exc:
         print(f"[ERROR] Git operation failed: {exc}")
         if exc.stderr:
             print(f"Details: {exc.stderr.strip()}")
         print("       Make sure git is installed and you have push access to the repo.")
         raise
-    finally:
-        tmp_path.unlink(missing_ok=True)
 
 
 def publish(version: str, message: str = "") -> None:
@@ -1179,12 +1252,19 @@ def publish(version: str, message: str = "") -> None:
     notes_path = _get_notes_file_for_release(version, message=message)
     tag        = f"v{version}"
 
+    baked_updater_path = RELEASES / "client-updater.py"
+    release_assets = [str(zip_path)]
+    if baked_updater_path.exists():
+        release_assets.append(str(baked_updater_path))
+    else:
+        print("[WARN] releases/client-updater.py not found — not uploading updater.")
+
     print(f"Creating GitHub Release {tag}...")
     try:
         subprocess.run(
             [
                 "gh", "release", "create", tag,
-                str(zip_path),
+                *release_assets,
                 "--title", f"v{version}",
                 "--notes-file", str(notes_path),
                 "--repo", f"{user}/{repo}",
@@ -1202,7 +1282,7 @@ def publish(version: str, message: str = "") -> None:
 
     print("Updating versions.json on gh-pages...")
     try:
-        _ensure_gh_pages_has_versions_json()
+        _push_pages_assets()
     except Exception:
         print("[WARN] Could not update gh-pages. Players won't see this version in the updater.")
         print("       You may need to push versions.json manually.")
@@ -1218,7 +1298,7 @@ def publish(version: str, message: str = "") -> None:
     print(f"{'=' * 42}\n")
     print("[OK] Done. Share the release URL with your players.")
     print("     New players: download the zip from the release page.")
-    print("     Existing players: run update.py from their current install.")
+    print("     Existing players: run client-updater.py from their current install.")
 
 
 # -------------------------
