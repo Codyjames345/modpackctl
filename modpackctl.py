@@ -54,6 +54,12 @@ repo = "<yourRepo>"
 [settings]
 modpack_prefix = "<YourModpackName>"
 
+# Display name shown in the updater GUI (optional; defaults to modpack_prefix)
+# modpack_name = "My Modpack"
+
+# URL to a logo image shown in the updater header (optional; PNG or GIF, ~32px tall)
+# logo_url = "https://example.com/logo.png"
+
 # List project IDs to exclude from client releases (server-side only mods)
 server_only = []
 
@@ -1067,17 +1073,22 @@ def release_server(version: str) -> Path | None:
 
 def _bake_updater_script(dest_path: Path) -> bool:
     """
-    Substitute __GITHUB_USER__ and __GITHUB_REPO__ in client-updater.py with the values
-    from modpackctl.toml, writing the result to dest_path.
+    Substitute config placeholders in client-updater.py and write the result to dest_path.
     Returns False if client-updater.py is not present in the project root.
     """
     if not UPDATE_SCRIPT.exists():
         print(f"[WARN] {UPDATE_SCRIPT} not found — skipping updater bake.")
         return False
     user, repo = get_github_info()
+    cfg      = load_config()
+    settings = cfg.get("settings", {})
+    modpack_name = settings.get("modpack_name") or settings.get("modpack_prefix", repo)
+    logo_url     = settings.get("logo_url", "")
     content = UPDATE_SCRIPT.read_text(encoding="utf-8")
     content = content.replace('"__GITHUB_USER__"', f'"{user}"')
     content = content.replace('"__GITHUB_REPO__"', f'"{repo}"')
+    content = content.replace('"__MODPACK_NAME__"', f'"{modpack_name}"')
+    content = content.replace('"__LOGO_URL__"',     f'"{logo_url}"')
     dest_path.parent.mkdir(parents=True, exist_ok=True)
     dest_path.write_text(content, encoding="utf-8")
     return True

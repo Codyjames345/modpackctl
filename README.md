@@ -26,6 +26,12 @@ repo = "YourRepoName"
 [settings]
 modpack_prefix = "YourModpackName"
 
+# Display name shown in the updater GUI (optional; defaults to modpack_prefix)
+# modpack_name = "CAGS4LIFE"
+
+# URL to a logo image shown in the updater header (optional; PNG or GIF, ~32px tall)
+# logo_url = "https://example.com/logo.png"
+
 # CurseForge project IDs to exclude from client releases
 server_only = [123456, 789012]
 
@@ -93,13 +99,16 @@ Versions follow `major.minor.patch`. The next version is calculated automaticall
 The flow:
 
 1. **Folder picker** — autodetects a likely `.minecraft` folder and remembers the last choice between runs.
-2. **Checking** — fetches `versions.json` and the relevant snapshots from GitHub Pages.
-3. **Changelog** — shows the player exactly what will be added, removed, and updated, by mod name.
-4. **Confirm & Update** — explicit click before any files are touched.
-5. **Atomic install** — all new files download to a temp folder first; if anything fails the install is left untouched.
-6. **Outcome** — clear success/error summary.
+2. **Checking** — fetches `versions.json` from GitHub Pages.
+3. **Version select** — dropdown defaulting to the latest version; includes a **Fresh install** checkbox to wipe existing mods and re-download everything clean. On confirm, the relevant snapshots are fetched from GitHub Pages.
+4. **Changelog** — shows exactly what will be added, removed, and updated, by mod name.
+5. **Confirm & Update** — explicit click before any files are touched.
+6. **Atomic install** — all new files download to a temp folder first; if anything fails the install is left untouched.
+7. **Outcome** — clear success/error summary.
 
-**Generating client-updater.py:** Running `release --client` (or `publish`) reads your `modpackctl.toml` and substitutes your GitHub username and repo name into `client-updater.py`, writing the result to `releases/client-updater.py`. This is the file players download — it is pre-configured for your repo and requires no setup on their end.
+A **⚙ gear button** in the header opens the colour settings dialog, where players can customise all UI colours with a colour picker. Settings are saved to prefs and persist between runs.
+
+**Generating client-updater.py:** Running `release --client` (or `publish`) reads your `modpackctl.toml` and bakes in your GitHub credentials, modpack display name (`modpack_name`), and optional logo URL (`logo_url`) into `client-updater.py`, writing the result to `releases/client-updater.py`. This is the file players download — it is pre-configured for your repo and requires no setup on their end.
 
 **Distribution:** `publish` uploads two assets to the GitHub Release: the modpack zip and the pre-configured `releases/client-updater.py`. `publish` also pushes enriched snapshots (with mod names) to the `gh-pages` branch so the changelog displays real names like "Sodium" instead of project IDs.
 
