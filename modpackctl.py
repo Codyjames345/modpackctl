@@ -1405,9 +1405,16 @@ def show_log() -> None:
     print("-" * 72)
     for entry in reversed(log):
         timestamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(entry["time"]))
+        message = entry.get("message", "")
+        message_preview = ""
+        if message:
+            first_line = message.splitlines()[0]
+            truncated  = first_line[:40] + "…" if len(first_line) > 40 else first_line
+            message_preview = f'  "{truncated}"'
         print(
             f"{entry['version']:<12} {entry['commit']:<12} {timestamp:<20}"
             f" {entry['added']:>6} {entry['removed']:>8} {entry['updated']:>8}"
+            f"{message_preview}"
         )
 
 
