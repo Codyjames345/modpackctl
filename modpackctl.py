@@ -8,17 +8,19 @@ import os
 import sys
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import TypeVar, cast
 try:
     import tomllib          # stdlib from Python 3.11+
 except ModuleNotFoundError:
     try:
-        import importlib
-        tomllib = importlib.import_module("tomli")
+        import tomli as tomllib  # type: ignore[no-redef]
     except ModuleNotFoundError:
         print("[ERROR] Python 3.11+ is required, or install tomli: pip install tomli")
         sys.exit(1)
 from pathlib import Path
 from urllib.parse import unquote, urlparse
+
+_JsonT = TypeVar("_JsonT", list, dict)
 
 # -------------------------
 # STORAGE
@@ -107,9 +109,11 @@ def get_filter_list(key: str) -> set[str]:
 # -------------------------
 
 
-def load_json(path: Path, default: list | dict) -> list | dict:
+def load_json(path: Path, default: _JsonT) -> _JsonT:
     """Return parsed JSON from path, or default if the file does not exist."""
-    return json.loads(path.read_text()) if path.exists() else default
+    if path.exists():
+        return json.loads(path.read_text())
+    return default
 
 
 def save_json(path: Path, data: list | dict) -> None:
@@ -422,7 +426,7 @@ def load_snapshot(commit_id: str) -> dict:
 
 def load_log() -> list[dict]:
     """Return the full version log as a list of entry dicts, oldest first."""
-    return load_json(LOG_FILE, [])
+    return cast(list[dict], load_json(LOG_FILE, []))
 
 
 def add_version(
@@ -695,7 +699,7 @@ def commit(source: str, major: bool = False) -> tuple[str, str, int] | None:
     )
 
     if not old_version:
-        print(f"[OK] Committed 1.0.0 — initial release ({commit_id})")
+        print(f"[OK] Committed {version} — initial release ({commit_id})")
     else:
         print(f"[OK] Committed {old_version} → {version} ({commit_id})")
 
@@ -843,7 +847,7 @@ def changelog(v1: str, v2: str | None, out: str = "changelog.md", message: str =
 
 def update(
     version: str,
-    exclude: set | None = None,
+    exclude: set[str] | None = None,
     exclude_categories: set[str] | None = None,
     suffix: str = "",
 ) -> dict:
@@ -938,28 +942,10 @@ def update(
 # RELEASE  (delegates to update, then zips)
 # -------------------------
 
-UPDATE_SCRIPT = Path("update.py")
-
-
-def _bake_updater_script(dest_path: Path) -> bool:
-    """
-    Write a configured copy of update.py to dest_path, with __GITHUB_USER__ and
-    __GITHUB_REPO__ replaced with the values from modpackctl.toml.
-    Returns False if update.py is not found in the project root.
-    """
-    if not UPDATE_SCRIPT.exists():
-        return False
-    github_user, github_repo = get_github_info()
-    script_text = UPDATE_SCRIPT.read_text(encoding="utf-8")
-    script_text = script_text.replace("__GITHUB_USER__", github_user)
-    script_text = script_text.replace("__GITHUB_REPO__", github_repo)
-    dest_path.write_text(script_text, encoding="utf-8")
-    return True
-
 
 def release(
     version: str,
-    exclude: set | None = None,
+    exclude: set[str] | None = None,
     exclude_categories: set[str] | None = None,
     suffix: str = "",
 ) -> Path | None:
@@ -972,7 +958,8 @@ def release(
 
     Returns the Path to the created zip, or None if the build failed.
     """
-    if not get_commit(version):
+    commit_id = get_commit(version)
+    if not commit_id:
         print(f"[ERROR] Version '{version}' not found in log.")
         return None
 
@@ -1004,7 +991,7 @@ def release(
                 file_path = Path(root) / filename
                 zf.write(file_path, file_path.relative_to(BUILD))
 
-    snapshot       = load_snapshot(get_commit(version))
+    snapshot       = load_snapshot(commit_id)
     excluded_count = len(exclude) if exclude else 0
     label          = f"v{version}-{suffix}" if suffix else f"v{version}"
     print(f"\n{'=' * 36}")
@@ -1189,22 +1176,15 @@ def publish(version: str, message: str = "") -> None:
         print("[ERROR] Release build failed — cannot publish.")
         sys.exit(1)
 
-    notes_path          = _get_notes_file_for_release(version, message=message)
-    baked_updater_path  = Path(f".modpackctl_update_{version}.py")
-    updater_baked       = _bake_updater_script(baked_updater_path)
-    if not updater_baked:
-        print("[WARN] update.py not found in project root — it will not be included in the release.")
-    tag = f"v{version}"
+    notes_path = _get_notes_file_for_release(version, message=message)
+    tag        = f"v{version}"
 
     print(f"Creating GitHub Release {tag}...")
-    release_assets = [str(zip_path)]
-    if updater_baked:
-        release_assets.append(str(baked_updater_path))
     try:
         subprocess.run(
             [
                 "gh", "release", "create", tag,
-                *release_assets,
+                str(zip_path),
                 "--title", f"v{version}",
                 "--notes-file", str(notes_path),
                 "--repo", f"{user}/{repo}",
@@ -1219,7 +1199,6 @@ def publish(version: str, message: str = "") -> None:
         sys.exit(1)
     finally:
         notes_path.unlink(missing_ok=True)
-        baked_updater_path.unlink(missing_ok=True)
 
     print("Updating versions.json on gh-pages...")
     try:
@@ -1328,15 +1307,15 @@ USAGE = """
 modpackctl — Minecraft modpack version control
 
 Commands:
-  init          <zip> [--force]                    Initialise repo from a CurseForge export zip
-  commit        <zip> [--major]                    Record a new version from an updated zip
-  log                                              List all committed versions
+  init          <zip> [--force]                   Initialise repo from a CurseForge export zip
+  commit        <zip> [--major]                   Record a new version from an updated zip
+  log                                             List all committed versions
   changelog     <v1> <v2> [out] [--message "..."]  Write a changelog between two versions
-  release       <version> [--client|--server]      Build a release zip
+  release       <version> [--client|--server]     Build a release zip
   publish       <version> [--message "..."]        Build client release + push to GitHub
   update        <version> [--client|--server]      Rebuild the build folder for a version
   purge         [--all]                            Remove old files from the download cache
-  export-example                                   Write modpackctl.toml.example from the built-in defaults
+  export-example                                  Write modpackctl.toml.example from the built-in defaults
 """.strip()
 
 if __name__ == "__main__":
