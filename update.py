@@ -1,5 +1,5 @@
 """
-update.py  —  CAGS4LIFE Modpack Updater
+update.py  —  Modpack Updater
 Double-click this file to check for and install modpack updates.
 
 Requirements: Python 3.8+  and  pip install requests
@@ -19,21 +19,29 @@ from tkinter import font as tkfont
 from urllib.parse import unquote, urlparse
 
 # -------------------------
-# CONFIG  (baked in at publish time)
+# CONFIG  (baked in at release time by modpackctl)
 # -------------------------
 
-VERSIONS_URL = "https://Codyjames345.github.io/CAGS4LIFE/versions.json"
-GITHUB_USER  = "Codyjames345"
-GITHUB_REPO  = "CAGS4LIFE"
+GITHUB_USER  = "__GITHUB_USER__"
+GITHUB_REPO  = "__GITHUB_REPO__"
+VERSIONS_URL = f"https://{GITHUB_USER}.github.io/{GITHUB_REPO}/versions.json"
+
+if "__" in GITHUB_USER or "__" in GITHUB_REPO:
+    print(
+        "[ERROR] update.py has not been configured.\n"
+        "This file is meant to be distributed as part of a modpack release built with modpackctl.\n"
+        "Run 'python modpackctl.py release <version> --client' to produce a configured copy."
+    )
+    sys.exit(1)
 
 # Paths relative to where update.py lives (the modpack root)
-HERE         = Path(__file__).parent.resolve()
-VERSION_FILE = HERE / "modpack_version.txt"
-MODS_DIR     = HERE / "mods"
-SHADERS_DIR  = HERE / "shaderpacks"
-RESOURCES_DIR= HERE / "resourcepacks"
+HERE          = Path(__file__).parent.resolve()
+VERSION_FILE  = HERE / "modpack_version.txt"
+MODS_DIR      = HERE / "mods"
+SHADERS_DIR   = HERE / "shaderpacks"
+RESOURCES_DIR = HERE / "resourcepacks"
 
-HEADERS = {"User-Agent": "CAGS4LIFE-updater/1.0"}
+HEADERS = {"User-Agent": f"{GITHUB_REPO}-updater/1.0"}
 
 # -------------------------
 # NETWORK
@@ -267,7 +275,7 @@ FONT_MONO = ("Consolas", 9)
 class UpdaterApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("CAGS4LIFE Modpack Updater")
+        self.title(f"{GITHUB_REPO} Modpack Updater")
         self.configure(bg=DARK_BG)
         self.resizable(False, False)
         self.geometry("600x520")
@@ -288,7 +296,7 @@ class UpdaterApp(tk.Tk):
         hdr = tk.Frame(self, bg=ACCENT2, padx=20, pady=14)
         hdr.pack(fill="x")
 
-        tk.Label(hdr, text="⛏  CAGS4LIFE Modpack Updater",
+        tk.Label(hdr, text=f"⛏  {GITHUB_REPO} Modpack Updater",
                  font=FONT_HEAD, bg=ACCENT2, fg=ACCENT).pack(side="left")
 
         self._version_label = tk.Label(hdr, text="", font=FONT_MONO,

@@ -938,6 +938,24 @@ def update(
 # RELEASE  (delegates to update, then zips)
 # -------------------------
 
+UPDATE_SCRIPT = Path("update.py")
+
+
+def _bake_updater_script(dest_path: Path) -> bool:
+    """
+    Write a configured copy of update.py to dest_path, with __GITHUB_USER__ and
+    __GITHUB_REPO__ replaced with the values from modpackctl.toml.
+    Returns False if update.py is not found in the project root.
+    """
+    if not UPDATE_SCRIPT.exists():
+        return False
+    github_user, github_repo = get_github_info()
+    script_text = UPDATE_SCRIPT.read_text(encoding="utf-8")
+    script_text = script_text.replace("__GITHUB_USER__", github_user)
+    script_text = script_text.replace("__GITHUB_REPO__", github_repo)
+    dest_path.write_text(script_text, encoding="utf-8")
+    return True
+
 
 def release(
     version: str,
@@ -1171,15 +1189,22 @@ def publish(version: str, message: str = "") -> None:
         print("[ERROR] Release build failed — cannot publish.")
         sys.exit(1)
 
-    notes_path = _get_notes_file_for_release(version, message=message)
-    tag        = f"v{version}"
+    notes_path          = _get_notes_file_for_release(version, message=message)
+    baked_updater_path  = Path(f".modpackctl_update_{version}.py")
+    updater_baked       = _bake_updater_script(baked_updater_path)
+    if not updater_baked:
+        print("[WARN] update.py not found in project root — it will not be included in the release.")
+    tag = f"v{version}"
 
     print(f"Creating GitHub Release {tag}...")
+    release_assets = [str(zip_path)]
+    if updater_baked:
+        release_assets.append(str(baked_updater_path))
     try:
         subprocess.run(
             [
                 "gh", "release", "create", tag,
-                str(zip_path),
+                *release_assets,
                 "--title", f"v{version}",
                 "--notes-file", str(notes_path),
                 "--repo", f"{user}/{repo}",
@@ -1194,6 +1219,7 @@ def publish(version: str, message: str = "") -> None:
         sys.exit(1)
     finally:
         notes_path.unlink(missing_ok=True)
+        baked_updater_path.unlink(missing_ok=True)
 
     print("Updating versions.json on gh-pages...")
     try:
