@@ -60,11 +60,11 @@ user = "<yourName>"
 repo = "<yourRepo>"
 
 [settings]
-# Prefix added to the start of released .zip files
-file_prefix = "<YourModpackName>"
+# Display name shown in the updater GUI and used as the release zip prefix
+modpack_name = "<YourModpackName>"
 
-# Display name shown in the updater GUI (optional; defaults to file_prefix)
-# modpack_name = "My Modpack"
+# Optional: override the zip file prefix if it should differ from modpack_name
+# file_prefix = "<YourModpackName>"
 
 # URL to a logo image shown in the updater header (optional; PNG or GIF, ~32px tall)
 # logo_url = "https://example.com/logo.png"
@@ -100,15 +100,16 @@ def get_github_info() -> tuple[str, str]:
 
 
 def get_file_prefix() -> str:
-    """Return the file_prefix string used when naming release zips."""
-    cfg = load_config()
-    try:
-        return cfg["settings"]["file_prefix"]
-    except KeyError:
-        print("[ERROR] Missing file_prefix in [settings]. Expected modpackctl.toml with:")
+    """Return the prefix used when naming release zips (file_prefix if set, else modpack_name)."""
+    cfg      = load_config()
+    settings = cfg.get("settings", {})
+    prefix   = settings.get("file_prefix") or settings.get("modpack_name")
+    if not prefix:
+        print("[ERROR] Missing modpack_name in [settings]. Expected modpackctl.toml with:")
         print("  [settings]")
-        print('  file_prefix = "YourModpackName"')
+        print('  modpack_name = "YourModpackName"')
         sys.exit(1)
+    return prefix
 
 
 def get_filter_list(key: str) -> set[str]:
@@ -668,6 +669,32 @@ def update_readme_modloader(modloader_id: str, readme_path: Path = Path("README.
 # -------------------------
 
 
+# -------------------------
+# README AUTO-UPDATE
+# -------------------------
+
+
+def _update_readme_modloader(old_modloader: str, new_modloader: str) -> bool:
+    """
+    Replace the modloader version string in README.md.
+    On first use, replaces the __MODLOADER__ placeholder.
+    On subsequent modloader changes, replaces the previous modloader string.
+    Returns True if README.md was modified.
+    """
+    readme_path = Path("README.md")
+    if not readme_path.exists() or not new_modloader:
+        return False
+    content = readme_path.read_text(encoding="utf-8")
+    if "__MODLOADER__" in content:
+        updated = content.replace("__MODLOADER__", new_modloader)
+    elif old_modloader and old_modloader in content:
+        updated = content.replace(old_modloader, new_modloader)
+    else:
+        return False
+    readme_path.write_text(updated, encoding="utf-8")
+    return True
+
+
 def init(source: str, force: bool = False) -> None:
     """
     Initialise a new repository from a CurseForge export zip, recording the
@@ -762,6 +789,8 @@ def commit(source: str, major: bool = False, message: str = "") -> tuple[str, st
 
     if modloader_changed:
         print(f"  [!] Modloader updated: {old_modloader} → {new_modloader}")
+    if new_modloader and _update_readme_modloader(old_modloader, new_modloader):
+        print(f"  [i] README.md modloader updated.")
     if changes["added"]:
         print(f"  [+] {len(changes['added'])} mod(s) added")
     if changes["removed"]:
@@ -1117,9 +1146,8 @@ def release_client(version: str) -> Path | None:
         print(f"[INFO] Excluding {len(excluded)} server-only mod(s).")
     zip_path = release(version, exclude=excluded, suffix="client")
     if zip_path:
-        baked_path = RELEASES / "client-updater.py"
-        if _bake_updater_script(baked_path):
-            print(f"[OK] Baked client-updater.py → {baked_path}")
+        if bake_updater():
+            print(f"[OK] Baked client-updater.py → {RELEASES / UPDATE_SCRIPT.name}")
     return zip_path
 
 
@@ -1136,29 +1164,6 @@ def release_server(version: str) -> Path | None:
 # -------------------------
 # PUBLISH
 # -------------------------
-
-
-def _bake_updater_script(dest_path: Path) -> bool:
-    """
-    Substitute config placeholders in client-updater.py and write the result to dest_path.
-    Returns False if client-updater.py is not present in the project root.
-    """
-    if not UPDATE_SCRIPT.exists():
-        print(f"[WARN] {UPDATE_SCRIPT} not found — skipping updater bake.")
-        return False
-    user, repo = get_github_info()
-    cfg      = load_config()
-    settings = cfg.get("settings", {})
-    modpack_name = settings.get("modpack_name") or settings.get("file_prefix", repo)
-    logo_url     = settings.get("logo_url", "")
-    content = UPDATE_SCRIPT.read_text(encoding="utf-8")
-    content = content.replace('"__GITHUB_USER__"', f'"{user}"')
-    content = content.replace('"__GITHUB_REPO__"', f'"{repo}"')
-    content = content.replace('"__MODPACK_NAME__"', f'"{modpack_name}"')
-    content = content.replace('"__LOGO_URL__"',     f'"{logo_url}"')
-    dest_path.parent.mkdir(parents=True, exist_ok=True)
-    dest_path.write_text(content, encoding="utf-8")
-    return True
 
 
 def set_version_message(version: str, message: str) -> None:
@@ -1474,14 +1479,34 @@ def build_pages() -> None:
     print("     Push the contents of this folder to your gh-pages branch.")
 
 
-def bake_updater() -> None:
-    """Write a pre-configured client-updater.py to releases/, substituting credentials from modpackctl.toml."""
-    RELEASES.mkdir(parents=True, exist_ok=True)
-    baked_path = RELEASES / UPDATE_SCRIPT.name
-    if _bake_updater_script(baked_path):
-        print(f"[OK] Baked {baked_path}")
-    else:
-        sys.exit(1)
+def bake_updater() -> bool:
+    """
+    Substitute config placeholders in client-updater.py and write the result to
+    releases/client-updater.py. Returns False if client-updater.py is not present.
+
+    Supported placeholders (written as bare Python string literals in client-updater.py):
+      __GITHUB_USER__   — GitHub username from modpackctl.toml
+      __GITHUB_REPO__   — GitHub repo name from modpackctl.toml
+      __MODPACK_NAME__  — settings.modpack_name from modpackctl.toml
+      __LOGO_URL__      — logo URL from modpackctl.toml (empty string if unset)
+    """
+    if not UPDATE_SCRIPT.exists():
+        print(f"[WARN] {UPDATE_SCRIPT} not found — skipping updater bake.")
+        return False
+    user, repo   = get_github_info()
+    cfg          = load_config()
+    settings     = cfg.get("settings", {})
+    modpack_name = settings.get("modpack_name", "")
+    logo_url     = settings.get("logo_url", "")
+    content = UPDATE_SCRIPT.read_text(encoding="utf-8")
+    content = content.replace('"__GITHUB_USER__"',  f'"{user}"')
+    content = content.replace('"__GITHUB_REPO__"',  f'"{repo}"')
+    content = content.replace('"__MODPACK_NAME__"', f'"{modpack_name}"')
+    content = content.replace('"__LOGO_URL__"',     f'"{logo_url}"')
+    dest_path = RELEASES / UPDATE_SCRIPT.name
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    dest_path.write_text(content, encoding="utf-8")
+    return True
 
 
 # -------------------------
@@ -1701,7 +1726,10 @@ if __name__ == "__main__":
         build_pages()
 
     elif cmd == "bake-updater":
-        bake_updater()
+        if not bake_updater():
+            print(f"[ERROR] Bake failed — is {UPDATE_SCRIPT} present in the project root?")
+            sys.exit(1)
+        print(f"[OK] Baked {RELEASES / UPDATE_SCRIPT.name}")
 
     elif cmd == "export-example":
         example_path = Path("modpackctl.toml.example")

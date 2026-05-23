@@ -24,10 +24,11 @@ user = "YourGitHubUsername"
 repo = "YourRepoName"
 
 [settings]
-modpack_prefix = "YourModpackName"
+# Display name shown in the updater GUI and used as the release zip prefix
+modpack_name = "YourModpackName"
 
-# Display name shown in the updater GUI (optional; defaults to modpack_prefix)
-# modpack_name = "CAGS4LIFE"
+# Optional: override the zip file prefix if it should differ from modpack_name
+# file_prefix = "YourModpackName"
 
 # URL to a logo image shown in the updater header (optional; PNG or GIF, ~32px tall)
 # logo_url = "https://example.com/logo.png"
@@ -92,6 +93,16 @@ Versions follow `major.minor.patch`. The next version is calculated automaticall
 - Modloader version changes → major bump (automatic)
 - `--major` flag → always bumps major
 
+## README Auto-Update
+
+Place the `__MODLOADER__` placeholder anywhere in your `README.md` to have modpackctl keep it up to date automatically:
+
+```markdown
+Modloader: __MODLOADER__
+```
+
+On the first `commit` that detects a modloader version, `__MODLOADER__` is replaced with the actual id (e.g. `neoforge-21.1.229`). On every subsequent `commit` where the modloader changes, the old id is replaced with the new one in-place. No action is needed beyond the initial placeholder — modpackctl handles it from there.
+
 ## Player Updater
 
 `client-updater.py` is a standalone Tkinter GUI. Players can save it anywhere (Desktop, Downloads, etc.) and double-click it to update their modpack — the script asks for the modpack folder rather than needing to live inside it.
@@ -108,7 +119,18 @@ The flow:
 
 A **⚙ gear button** in the header opens the colour settings dialog, where players can customise all UI colours with a colour picker. Settings are saved to prefs and persist between runs.
 
-**Generating client-updater.py:** Running `release --client` (or `publish`) reads your `modpackctl.toml` and bakes in your GitHub credentials, modpack display name (`modpack_name`), and optional logo URL (`logo_url`) into `client-updater.py`, writing the result to `releases/client-updater.py`. This is the file players download — it is pre-configured for your repo and requires no setup on their end.
+**Generating client-updater.py:** Running `release --client` (or `publish`) reads your `modpackctl.toml` and substitutes placeholders in `client-updater.py`, writing the result to `releases/client-updater.py`. This is the file players download — it is pre-configured for your repo and requires no setup on their end.
+
+Use these placeholders as plain string literals anywhere in `client-updater.py`:
+
+| Placeholder | Replaced with |
+|---|---|
+| `"__GITHUB_USER__"` | `github.user` from `modpackctl.toml` |
+| `"__GITHUB_REPO__"` | `github.repo` from `modpackctl.toml` |
+| `"__MODPACK_NAME__"` | `settings.modpack_name` from `modpackctl.toml` |
+| `"__LOGO_URL__"` | `settings.logo_url`, or an empty string if not set |
+
+Run `bake-updater` to bake without building a full release.
 
 **Distribution:** `publish` uploads two assets to the GitHub Release: the modpack zip and the pre-configured `releases/client-updater.py`. `publish` also pushes enriched snapshots (with mod names) to the `gh-pages` branch so the changelog displays real names like "Sodium" instead of project IDs.
 
