@@ -1891,6 +1891,19 @@ def _ensure_template(template_path: Path) -> None:
         print(f"[INFO] Copied {template_path.name} to current directory — you can customise it for this modpack.")
 
 
+def reset_template(server: bool = False) -> None:
+    target = SERVER_UPDATE_SCRIPT if server else CLIENT_UPDATE_SCRIPT
+    if not target.exists():
+        print(f"[INFO] {target} does not exist — nothing to remove.")
+        return
+    answer = input(f"Delete {target} from the current directory? [y/N] ").strip().lower()
+    if answer not in ("y", "yes"):
+        print("[INFO] Aborted.")
+        sys.exit(0)
+    target.unlink()
+    print(f"[OK] Deleted {target}.")
+
+
 def bake_client_updater() -> bool:
     """
     Substitute config placeholders in client-updater-template.py and write the result to
@@ -2166,6 +2179,10 @@ if __name__ == "__main__":
     parser_bake = subparsers.add_parser("bake-updater", help="Bake the updater script with config values")
     parser_bake.add_argument("--server", action="store_true", help="Bake server-updater.py instead of client-updater.py (no exe)")
 
+    # reset-template
+    parser_reset_tmpl = subparsers.add_parser("reset-template", help="Delete the updater template from the current directory")
+    parser_reset_tmpl.add_argument("--server", action="store_true", help="Delete server-updater-template.py instead of client-updater-template.py")
+
     # build-exe
     subparsers.add_parser("build-exe", help="Build releases/client-updater.exe from the baked client updater")
 
@@ -2251,6 +2268,9 @@ if __name__ == "__main__":
     elif args.command == "export-cf":
         if not export_cf(args.version):
             sys.exit(1)
+
+    elif args.command == "reset-template":
+        reset_template(args.server)
 
     elif args.command == "export-example":
         CONFIG_EXAMPLE.write_text(DEFAULT_CONFIG, encoding="utf-8")

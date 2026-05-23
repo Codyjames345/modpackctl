@@ -220,6 +220,7 @@ python modpackctl.py publish 1.2.0 --message "Improved performance and fixed cra
 | `purge [--all]` | Remove stale files from the download cache. Without `--all`, only removes mods not in the latest snapshot. |
 | `build-pages` | Write `versions.json` and `snapshots/` to a local `gh-pages/` folder. Useful for manually pushing to `gh-pages` if `publish` fails. |
 | `bake-updater [--server]` | Bake `releases/{file_prefix}-client-updater.py` from the client updater template. `--server` bakes `releases/{file_prefix}-server-updater.py` instead (no exe). |
+| `reset-template [--server]` | Delete `client-updater-template.py` from the current directory (prompts for confirmation). `--server` deletes `server-updater-template.py` instead. Useful for reverting local customisations so the next bake restores the bundled default. |
 | `build-exe` | Build `releases/{file_prefix}-client-updater.exe` from the baked client updater using PyInstaller. When `enable_secret` is true, also downloads and bundles the easter egg video and audio. Requires `pip install pyinstaller yt-dlp imageio-ffmpeg Pillow`. Also runs automatically as part of `release`. |
 | `export-cf <version>` | Build a CurseForge-format modpack zip for the given version, suitable for importing directly into the CurseForge launcher. Includes `manifest.json`, `modlist.html`, and the stored overrides with `bcc-common.toml` stamped with the correct version. |
 | `export-example` | Write the built-in config template to `modpackctl.toml.example`. |
