@@ -1,4 +1,5 @@
 import json
+import re
 import zipfile
 import shutil
 import requests
@@ -41,6 +42,13 @@ UPDATE_SCRIPT = Path("client-updater.py")
 
 CF_URL  = "https://api.cfwidget.com/{}"
 HEADERS = {"User-Agent": "modpackctl/1.0"}
+
+_LOADER_DISPLAY_NAMES: dict[str, str] = {
+    "neoforge": "NeoForge",
+    "forge":    "Forge",
+    "fabric":   "Fabric",
+    "quilt":    "Quilt",
+}
 
 # -------------------------
 # CONFIG
@@ -211,6 +219,15 @@ def get_modloader_version(manifest: dict) -> str:
             return loader.get("id", "")
     # Fall back to the first loader if none is marked primary
     return loaders[0].get("id", "") if loaders else ""
+
+
+def _modloader_display(modloader_id: str) -> str:
+    """Convert a manifest modloader id (e.g. 'neoforge-21.1.229') to 'NeoForge 21.1.229'."""
+    if "-" in modloader_id:
+        prefix, version = modloader_id.split("-", 1)
+        name = _LOADER_DISPLAY_NAMES.get(prefix.lower(), prefix.capitalize())
+        return f"{name} {version}"
+    return modloader_id
 
 
 def store_overrides(zip_path: Path | str) -> int:
@@ -621,6 +638,29 @@ def download_mod(project_id: str, file_id: str, force: bool = False) -> dict:
         "project_id": project_id, "file_id": file_id,
         "file": filename, "cached": False, "category": category,
     }
+
+
+# -------------------------
+# INIT
+# -------------------------
+
+
+def update_readme_modloader(modloader_id: str, readme_path: Path = Path("README.md")) -> bool:
+    """
+    Replace every known modloader version string in README.md with the display
+    form of modloader_id (e.g. 'neoforge-21.1.250' → 'NeoForge 21.1.250').
+    Returns True if the file was updated, False if unchanged or not found.
+    """
+    if not modloader_id or not readme_path.exists():
+        return False
+    display  = _modloader_display(modloader_id)
+    names    = "|".join(re.escape(n) for n in _LOADER_DISPLAY_NAMES.values())
+    original = readme_path.read_text(encoding="utf-8")
+    updated  = re.sub(rf"(?:{names})\s+[\d.]+", display, original)
+    if updated == original:
+        return False
+    readme_path.write_text(updated, encoding="utf-8")
+    return True
 
 
 # -------------------------
