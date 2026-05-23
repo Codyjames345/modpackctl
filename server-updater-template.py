@@ -348,9 +348,9 @@ def main() -> None:
     parser.add_argument(
         "--workers",
         type=int,
-        default=4,
+        default=10,
         metavar="N",
-        help="Number of parallel download workers (default: 4).",
+        help="Number of parallel download workers (default: 10).",
     )
     if argcomplete:
         argcomplete.autocomplete(parser)

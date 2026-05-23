@@ -1098,7 +1098,7 @@ def update(
     completed_count = 0
     successful_results: list[dict] = []
 
-    with ThreadPoolExecutor(max_workers=5) as executor:
+    with ThreadPoolExecutor(max_workers=10) as executor:
         future_to_project_id = {
             executor.submit(download_mod, project_id, file_id): project_id
             for project_id, file_id in mods_to_build.items()

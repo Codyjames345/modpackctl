@@ -1469,7 +1469,7 @@ class UpdaterApp(tk.Tk):
             count_lock = threading.Lock()
             if downloads:
                 self._set_progress(f"Downloading 0 / {len(downloads)}…")
-            with ThreadPoolExecutor(max_workers=5) as executor:
+            with ThreadPoolExecutor(max_workers=10) as executor:
                 future_map = {
                     executor.submit(download_mod_file, project_id, file_id, tmp_dir): (project_id, display_name, is_update)
                     for project_id, file_id, display_name, is_update in downloads
