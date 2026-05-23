@@ -38,13 +38,19 @@ CONFIG_FILE     = Path("modpackctl.toml")
 
 BUILD         = Path("build")
 RELEASES      = Path("releases")
-UPDATE_SCRIPT       = Path("client-updater-template.py")   # source template (never modified at runtime)
+CLIENT_UPDATE_SCRIPT = Path("client-updater-template.py")   # client updater source template
+SERVER_UPDATE_SCRIPT = Path("server-updater-template.py")   # server updater source template
 _DANCE_DEFAULT_URL  = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
 
 
-def _baked_updater_path() -> Path:
-    """Return releases/{file_prefix}-updater.py — the baked output written during release/bake."""
-    return RELEASES / f"{get_file_prefix()}-updater.py"
+def _baked_client_updater_path() -> Path:
+    """Return releases/{file_prefix}-client-updater.py — the baked client updater output."""
+    return RELEASES / f"{get_file_prefix()}-client-updater.py"
+
+
+def _baked_server_updater_path() -> Path:
+    """Return releases/{file_prefix}-server-updater.py — the baked server updater output."""
+    return RELEASES / f"{get_file_prefix()}-server-updater.py"
 
 CF_URL  = "https://api.cfwidget.com/{}"
 HEADERS = {"User-Agent": "modpackctl/1.0"}
@@ -1168,8 +1174,8 @@ def release_client(version: str) -> Path | None:
         print(f"[INFO] Excluding {len(excluded)} server-only mod(s).")
     zip_path = release(version, exclude=excluded, suffix="client")
     if zip_path:
-        if bake_updater():
-            _build_exe(_baked_updater_path())
+        if bake_client_updater():
+            _build_exe(_baked_client_updater_path())
     return zip_path
 
 
@@ -1212,7 +1218,11 @@ def _build_versions_json() -> dict:
         if entry.get("modloader"):
             version_entry["modloader"] = entry["modloader"]
         versions.append(version_entry)
-    return {"latest": log[-1]["version"] if log else None, "versions": versions}
+    client_only_ids = sorted(get_filter_list("client_only"))
+    payload: dict = {"latest": log[-1]["version"] if log else None, "versions": versions}
+    if client_only_ids:
+        payload["client_only_ids"] = client_only_ids
+    return payload
 
 
 def _get_notes_file_for_release(version: str, message: str = "", side: str = "") -> Path:
@@ -1568,9 +1578,9 @@ def _clear_icon_cache() -> None:
 
 def build_exe() -> None:
     """Build the baked updater exe from releases/{file_prefix}-updater.py."""
-    if not bake_updater():
+    if not bake_client_updater():
         sys.exit(1)
-    if not _build_exe(_baked_updater_path()):
+    if not _build_exe(_baked_client_updater_path()):
         sys.exit(1)
 
 
@@ -1611,7 +1621,7 @@ def publish(version: str, message: str = "") -> None:
     notes_path = _get_notes_file_for_release(version, message=message, side="client")
     tag        = f"v{version}"
 
-    baked_updater_path = _baked_updater_path()
+    baked_updater_path = _baked_client_updater_path()
     baked_exe_path     = baked_updater_path.with_suffix(".exe")
 
     release_assets = [str(zip_path)]
@@ -1682,7 +1692,7 @@ def build_pages() -> None:
     print("     Push the contents of this folder to your gh-pages branch.")
 
 
-def bake_updater() -> bool:
+def bake_client_updater() -> bool:
     """
     Substitute config placeholders in client-updater-template.py and write the result to
     releases/{file_prefix}-updater.py. Returns False if client-updater-template.py is not present.
@@ -1695,8 +1705,8 @@ def bake_updater() -> bool:
       __SECRET_VIDEO_URL__ — easter egg video URL (defaults to Never Gonna Give You Up)
       __ENABLE_RAINBOW__   — True/False; settings.enable_rainbow from modpackctl.toml (default: True)
     """
-    if not UPDATE_SCRIPT.exists():
-        print(f"[WARN] {UPDATE_SCRIPT} not found — skipping updater bake.")
+    if not CLIENT_UPDATE_SCRIPT.exists():
+        print(f"[WARN] {CLIENT_UPDATE_SCRIPT} not found — skipping updater bake.")
         return False
     user, repo        = get_github_info()
     cfg               = load_config()
@@ -1706,7 +1716,7 @@ def bake_updater() -> bool:
     secret_video_url  = settings.get("secret_video_url", _DANCE_DEFAULT_URL)
     enable_secret     = settings.get("enable_secret",  True)
     enable_rainbow    = settings.get("enable_rainbow",  False)
-    content = UPDATE_SCRIPT.read_text(encoding="utf-8")
+    content = CLIENT_UPDATE_SCRIPT.read_text(encoding="utf-8")
     content = content.replace('"__GITHUB_USER__"',      f'"{user}"')
     content = content.replace('"__GITHUB_REPO__"',      f'"{repo}"')
     content = content.replace('"__MODPACK_NAME__"',     f'"{modpack_name}"')
@@ -1714,10 +1724,37 @@ def bake_updater() -> bool:
     content = content.replace('"__SECRET_VIDEO_URL__"', f'"{secret_video_url}"')
     content = content.replace('"__ENABLE_SECRET__"',    str(bool(enable_secret)))
     content = content.replace('"__ENABLE_RAINBOW__"',   str(bool(enable_rainbow)))
-    dest_path = _baked_updater_path()
+    dest_path = _baked_client_updater_path()
     dest_path.parent.mkdir(parents=True, exist_ok=True)
     dest_path.write_text(content, encoding="utf-8")
-    print(f"[OK] Baked {UPDATE_SCRIPT.name} → {dest_path}")
+    print(f"[OK] Baked {CLIENT_UPDATE_SCRIPT.name} → {dest_path}")
+    return True
+
+
+def bake_server_updater() -> bool:
+    """
+    Substitute config placeholders in server-updater-template.py and write the result to
+    releases/{file_prefix}-server-updater.py. Returns False if the template is not present.
+
+    Supported placeholders:
+      __GITHUB_USER__  — GitHub username from modpackctl.toml
+      __GITHUB_REPO__  — GitHub repo name from modpackctl.toml
+      __MODPACK_NAME__ — settings.modpack_name from modpackctl.toml
+    """
+    if not SERVER_UPDATE_SCRIPT.exists():
+        print(f"[WARN] {SERVER_UPDATE_SCRIPT} not found — skipping server updater bake.")
+        return False
+    user, repo   = get_github_info()
+    cfg          = load_config()
+    modpack_name = cfg.get("settings", {}).get("modpack_name", "")
+    content = SERVER_UPDATE_SCRIPT.read_text(encoding="utf-8")
+    content = content.replace('"__GITHUB_USER__"',  f'"{user}"')
+    content = content.replace('"__GITHUB_REPO__"',  f'"{repo}"')
+    content = content.replace('"__MODPACK_NAME__"', f'"{modpack_name}"')
+    dest_path = _baked_server_updater_path()
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    dest_path.write_text(content, encoding="utf-8")
+    print(f"[OK] Baked {SERVER_UPDATE_SCRIPT.name} → {dest_path}")
     return True
 
 
@@ -1824,7 +1861,7 @@ Commands:
   update        <version> [--client|--server]       Rebuild the build folder for a version
   purge         [--all]                             Remove old files from the download cache
   build-pages                                       Build versions.json + snapshots/ locally to gh-pages/
-  bake-updater                                      Write a pre-configured client-updater.py to releases/
+  bake-updater  [--client|--server]                 Write a pre-configured updater script to releases/ (default: client)
   build-exe                                         Build releases/client-updater.exe from the baked updater
   export-example                                    Write modpackctl.toml.example from the built-in defaults
 """.strip()
@@ -1942,10 +1979,16 @@ if __name__ == "__main__":
         build_pages()
 
     elif cmd == "bake-updater":
-        if not bake_updater():
-            print(f"[ERROR] Bake failed — is {UPDATE_SCRIPT} present in the project root?")
-            sys.exit(1)
-        print(f"[OK] Baked {_baked_updater_path()}")
+        if "--server" in sys.argv:
+            if not bake_server_updater():
+                print(f"[ERROR] Bake failed — is {SERVER_UPDATE_SCRIPT} present in the project root?")
+                sys.exit(1)
+            print(f"[OK] Baked {_baked_server_updater_path()}")
+        else:
+            if not bake_client_updater():
+                print(f"[ERROR] Bake failed — is {CLIENT_UPDATE_SCRIPT} present in the project root?")
+                sys.exit(1)
+            print(f"[OK] Baked {_baked_client_updater_path()}")
 
     elif cmd == "export-example":
         example_path = Path("modpackctl.toml.example")
