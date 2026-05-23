@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -39,6 +40,41 @@ if "__" in MODPACK_NAME:
     MODPACK_NAME = GITHUB_REPO
 
 HEADERS = {"User-Agent": f"{GITHUB_REPO}-server-updater/1.0"}
+
+
+# -------------------------
+# PREFS  (remembers the server directory between runs)
+# -------------------------
+
+def _prefs_dir() -> Path:
+    """Return the per-user prefs directory for the updater."""
+    return Path.home() / ".modpack-updater"
+
+
+def _prefs_path() -> Path:
+    """Return the prefs file path, namespaced per modpack (server variant)."""
+    return _prefs_dir() / f"{GITHUB_USER}-{GITHUB_REPO}-server.json"
+
+
+def load_prefs() -> dict:
+    """Return saved prefs, or empty dict if missing/corrupt."""
+    path = _prefs_path()
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def save_prefs(data: dict) -> None:
+    """Persist prefs to disk. Best-effort; failures are silently ignored."""
+    path = _prefs_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except OSError:
+        pass
 
 
 # -------------------------
@@ -160,20 +196,50 @@ def download_mod_file(project_id: str, file_id: str, dest_dir: Path) -> Path | N
 # VERSION FILE
 # -------------------------
 
-_VERSION_FILE_NAME = "modpack_version.txt"
+_BCC_CONFIG_PATH = Path("config") / "bcc-common.toml"
+_BCC_VERSION_RE  = re.compile(r'^([ \t]*modpackVersion\s*=\s*)"([^"]*)"', re.MULTILINE)
+_BCC_NAME_RE     = re.compile(r'^([ \t]*modpackName\s*=\s*)"([^"]*)"',    re.MULTILINE)
 
 
 def read_installed_version(server_dir: Path) -> str | None:
-    """Return the version string recorded in modpack_version.txt, or None if absent."""
-    version_file = server_dir / _VERSION_FILE_NAME
-    if not version_file.exists():
+    """Return the modpackVersion from config/bcc-common.toml, or None if absent/unset."""
+    bcc_path = server_dir / _BCC_CONFIG_PATH
+    if not bcc_path.exists():
         return None
-    return version_file.read_text(encoding="utf-8").strip() or None
+    match = _BCC_VERSION_RE.search(bcc_path.read_text(encoding="utf-8"))
+    if not match:
+        return None
+    version = match.group(2)
+    return version if version and version != "CHANGE_ME" else None
+
+
+_BCC_TEMPLATE = """\
+#General settings
+[general]
+\t#The name of the modpack
+\tmodpackName = "{name}"
+\t#The version of the modpack
+\tmodpackVersion = "{version}"
+\t#Use the metadata.json to determine the modpack version
+\t#ONLY ENABLE THIS IF YOU KNOW WHAT YOU ARE DOING
+\tuseMetadata = false
+"""
 
 
 def write_installed_version(server_dir: Path, version: str) -> None:
-    """Write the installed version to modpack_version.txt."""
-    (server_dir / _VERSION_FILE_NAME).write_text(version, encoding="utf-8")
+    """Write modpackVersion (and modpackName) into config/bcc-common.toml."""
+    bcc_path = server_dir / _BCC_CONFIG_PATH
+    if not bcc_path.exists():
+        bcc_path.parent.mkdir(parents=True, exist_ok=True)
+        bcc_path.write_text(
+            _BCC_TEMPLATE.format(name=MODPACK_NAME, version=version),
+            encoding="utf-8",
+        )
+        return
+    text = bcc_path.read_text(encoding="utf-8")
+    text = _BCC_VERSION_RE.sub(rf'\g<1>"{version}"',      text)
+    text = _BCC_NAME_RE.sub(   rf'\g<1>"{MODPACK_NAME}"', text)
+    bcc_path.write_text(text, encoding="utf-8")
 
 
 # -------------------------
@@ -284,7 +350,29 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    server_dir = Path(args.server_dir) if args.server_dir else Path.cwd()
+    prefs = load_prefs()
+
+    if args.server_dir:
+        server_dir = Path(args.server_dir)
+    else:
+        remembered = prefs.get("last_server_dir")
+        if remembered and Path(remembered).is_dir():
+            prompt = f"Server directory [{remembered}]: "
+        else:
+            prompt = "Server directory: "
+        try:
+            entered = input(prompt).strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nAborted.")
+            sys.exit(0)
+        if not entered and remembered:
+            server_dir = Path(remembered)
+        elif entered:
+            server_dir = Path(entered)
+        else:
+            print("[ERROR] No server directory provided.")
+            sys.exit(1)
+
     if not server_dir.is_dir():
         print(f"[ERROR] Server directory does not exist: {server_dir}")
         sys.exit(1)
@@ -454,6 +542,8 @@ def main() -> None:
                 print(f"  [WARN] Could not delete {file_path.name}: {error}")
 
     write_installed_version(server_dir, target_version)
+    prefs["last_server_dir"] = str(server_dir)
+    save_prefs(prefs)
     print(f"\n[OK] Updated to {MODPACK_NAME} {target_version}.")
 
 

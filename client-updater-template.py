@@ -17,6 +17,7 @@ import json
 import os
 import queue
 import random
+import re
 import shutil
 import subprocess
 import sys
@@ -109,6 +110,52 @@ def save_prefs(data: dict) -> None:
 # FOLDER AUTODETECTION
 # -------------------------
 
+_BCC_CONFIG_PATH = Path("config") / "bcc-common.toml"
+_BCC_VERSION_RE  = re.compile(r'^([ \t]*modpackVersion\s*=\s*)"([^"]*)"', re.MULTILINE)
+_BCC_NAME_RE     = re.compile(r'^([ \t]*modpackName\s*=\s*)"([^"]*)"',    re.MULTILINE)
+
+
+def read_installed_version(modpack_dir: Path) -> str | None:
+    """Return the modpackVersion from config/bcc-common.toml, or None if absent/unset."""
+    bcc_path = modpack_dir / _BCC_CONFIG_PATH
+    if not bcc_path.exists():
+        return None
+    match = _BCC_VERSION_RE.search(bcc_path.read_text(encoding="utf-8"))
+    if not match:
+        return None
+    version = match.group(2)
+    return version if version and version != "CHANGE_ME" else None
+
+
+_BCC_TEMPLATE = """\
+#General settings
+[general]
+\t#The name of the modpack
+\tmodpackName = "{name}"
+\t#The version of the modpack
+\tmodpackVersion = "{version}"
+\t#Use the metadata.json to determine the modpack version
+\t#ONLY ENABLE THIS IF YOU KNOW WHAT YOU ARE DOING
+\tuseMetadata = false
+"""
+
+
+def write_installed_version(modpack_dir: Path, version: str) -> None:
+    """Write modpackVersion (and modpackName) into config/bcc-common.toml."""
+    bcc_path = modpack_dir / _BCC_CONFIG_PATH
+    if not bcc_path.exists():
+        bcc_path.parent.mkdir(parents=True, exist_ok=True)
+        bcc_path.write_text(
+            _BCC_TEMPLATE.format(name=MODPACK_NAME, version=version),
+            encoding="utf-8",
+        )
+        return
+    text = bcc_path.read_text(encoding="utf-8")
+    text = _BCC_VERSION_RE.sub(rf'\g<1>"{version}"',      text)
+    text = _BCC_NAME_RE.sub(   rf'\g<1>"{MODPACK_NAME}"', text)
+    bcc_path.write_text(text, encoding="utf-8")
+
+
 def autodetect_minecraft_folder() -> Path | None:
     """Return a likely default Minecraft folder, or None if none exists."""
     home = Path.home()
@@ -127,7 +174,7 @@ def is_likely_modpack_folder(folder: Path) -> bool:
     """Return True if folder looks like a Minecraft modpack root."""
     if not folder.is_dir():
         return False
-    return (folder / "mods").is_dir() or (folder / "modpack_version.txt").exists()
+    return (folder / "mods").is_dir() or (folder / _BCC_CONFIG_PATH).exists()
 
 
 # -------------------------
@@ -865,7 +912,7 @@ class UpdaterApp(tk.Tk):
                 if not is_likely_modpack_folder(new_path):
                     confirmed = messagebox.askyesno(
                         "Folder may not be a modpack",
-                        f"This folder does not contain a 'mods' subfolder or 'modpack_version.txt'.\n\n"
+                        f"This folder does not contain a 'mods' subfolder or 'config/bcc-common.toml'.\n\n"
                         f"{new_path}\n\nContinue anyway?",
                         parent=dialog,
                     )
@@ -975,7 +1022,7 @@ class UpdaterApp(tk.Tk):
         if not is_likely_modpack_folder(path):
             confirmed = messagebox.askyesno(
                 "Folder may not be a modpack",
-                f"This folder does not contain a 'mods' subfolder or 'modpack_version.txt'.\n\n"
+                f"This folder does not contain a 'mods' subfolder or 'config/bcc-common.toml'.\n\n"
                 f"{path}\n\nContinue anyway?",
             )
             if not confirmed:
@@ -1002,11 +1049,7 @@ class UpdaterApp(tk.Tk):
     def _run_check(self) -> None:
         try:
             assert self.modpack_dir is not None
-            version_file = self.modpack_dir / "modpack_version.txt"
-            self.local_version = (
-                version_file.read_text(encoding="utf-8").strip()
-                if version_file.exists() else None
-            )
+            self.local_version = read_installed_version(self.modpack_dir)
 
             versions_data       = fetch_versions()
             self.versions_data  = versions_data
@@ -1486,13 +1529,11 @@ class UpdaterApp(tk.Tk):
                 except OSError as exc:
                     self._log(f"  [warn] could not install {tmp_path.name}: {exc}", "log_warn")
 
-            # Phase 4: record the new version last so a crash mid-update
-            # leaves modpack_version.txt pointing at the old version.
-            (self.modpack_dir / "modpack_version.txt").write_text(
-                self.target_version, encoding="utf-8",
-            )
+            # Phase 4: record the installed version last — a crash during
+            # phases 1-3 leaves bcc-common.toml at the previous version.
+            write_installed_version(self.modpack_dir, self.target_version)
             self._log("")
-            self._log(f"modpack_version.txt → {self.target_version}", "log_version")
+            self._log(f"bcc-common.toml → {self.target_version}", "log_version")
 
             self.after(0, lambda: self._show_outcome(
                 success=True,
