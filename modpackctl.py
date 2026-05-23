@@ -1,3 +1,4 @@
+import argparse
 import json
 import re
 import zipfile
@@ -1983,159 +1984,136 @@ def show_log() -> None:
 # CLI
 # -------------------------
 
-USAGE = """
-modpackctl — Minecraft modpack version control
-
-Commands:
-  init          <zip> [--force]                     Initialise repo from a CurseForge export zip
-  commit        <zip> [--major] [--message "..."]   Record a new version; --message sets the release note shown to players
-  log                                               List all committed versions
-  changelog     <v2> [out] [--server] [--message "..."]        Write a client changelog for v2 as an initial release; --server for server view
-  changelog     <v1> <v2> [out] [--server] [--message "..."]   Write a client changelog between two versions; --server for server view
-  release       <version> [--server]                Build a client release zip (bakes updater + exe); --server builds server zip and bakes server-updater
-  publish       <version> [--message "..."]         Build client release + push to GitHub (--message overrides the committed message)
-  update        <version> [--server]                Rebuild the client build folder for a version; --server for server build
-  purge         [--all]                             Remove old files from the download cache
-  build-pages                                       Build versions.json + snapshots/ locally to gh-pages/
-  bake-updater  [--server]                          Bake client-updater.py to releases/; --server bakes server-updater.py instead (no exe)
-  build-exe                                         Build releases/client-updater.exe from the baked client updater
-  export-cf     <version>                           Build a CurseForge-format modpack zip for the given version
-  export-example                                    Write modpackctl.toml.example from the built-in defaults
-""".strip()
-
 if __name__ == "__main__":
     load_config()  # ensure modpackctl.toml exists on every run
 
-    if len(sys.argv) < 2:
-        print(USAGE)
-        sys.exit(0)
+    parser = argparse.ArgumentParser(
+        prog="modpackctl",
+        description="modpackctl — Minecraft modpack version control",
+    )
+    subparsers = parser.add_subparsers(dest="command", metavar="command")
+    subparsers.required = True
 
-    cmd = sys.argv[1]
+    # init
+    parser_init = subparsers.add_parser("init", help="Initialise repo from a CurseForge export zip")
+    parser_init.add_argument("zip", help="Path to the CurseForge export zip")
+    parser_init.add_argument("--force", action="store_true", help="Reset history, keeping the download cache")
 
-    if cmd == "init":
-        if len(sys.argv) < 3:
-            print("Usage: init <zip> [--force]")
-            sys.exit(1)
-        init(sys.argv[2], "--force" in sys.argv)
+    # commit
+    parser_commit = subparsers.add_parser("commit", help="Record a new version from an updated export")
+    parser_commit.add_argument("zip", help="Path to the CurseForge export zip")
+    parser_commit.add_argument("--major", action="store_true", help="Force a major version bump")
+    parser_commit.add_argument("--message", metavar="MESSAGE", default="", help="Release note shown to players in the updater changelog")
 
-    elif cmd == "commit":
-        if len(sys.argv) < 3:
-            print("Usage: commit <zip> [--major] [--message \"...\"]")
-            sys.exit(1)
-        commit_message = ""
-        if "--message" in sys.argv:
-            message_index = sys.argv.index("--message")
-            if message_index + 1 < len(sys.argv):
-                commit_message = sys.argv[message_index + 1]
-        commit(sys.argv[2], "--major" in sys.argv, message=commit_message)
+    # log
+    subparsers.add_parser("log", help="List all committed versions with diff stats")
 
-    elif cmd == "log":
+    # changelog
+    parser_changelog = subparsers.add_parser("changelog", help="Generate a Markdown changelog between two versions")
+    parser_changelog.add_argument("v1", help="Starting version (or the only version for an initial-release changelog)")
+    parser_changelog.add_argument("v2", nargs="?", default=None, help="Ending version (omit to treat v1 as an initial release)")
+    parser_changelog.add_argument("--out", default="changelog.md", metavar="FILE", help="Output file (default: changelog.md)")
+    parser_changelog.add_argument("--server", action="store_true", help="Server view: exclude client-only mods, shaderpacks, and resourcepacks")
+    parser_changelog.add_argument("--message", metavar="MESSAGE", default="", help="Optional note inserted below the heading")
+
+    # release
+    parser_release = subparsers.add_parser("release", help="Build a release zip (client by default)")
+    parser_release.add_argument("version", help="Version to release")
+    parser_release.add_argument("--server", action="store_true", help="Build a server release and bake server-updater (no exe)")
+
+    # publish
+    parser_publish = subparsers.add_parser("publish", help="Build a client release and publish to GitHub")
+    parser_publish.add_argument("version", help="Version to publish")
+    parser_publish.add_argument("--message", metavar="MESSAGE", default="", help="Release note (overrides the message set at commit time)")
+
+    # update
+    parser_update = subparsers.add_parser("update", help="Rebuild the build folder for a version without zipping")
+    parser_update.add_argument("version", help="Version to build")
+    parser_update.add_argument("--server", action="store_true", help="Server view: exclude client-only mods, shaderpacks, and resourcepacks")
+
+    # purge
+    parser_purge = subparsers.add_parser("purge", help="Remove old files from the download cache")
+    parser_purge.add_argument("--all", action="store_true", help="Clear the entire cache instead of just stale files")
+
+    # build-pages
+    subparsers.add_parser("build-pages", help="Build versions.json + snapshots/ locally to gh-pages/")
+
+    # bake-updater
+    parser_bake = subparsers.add_parser("bake-updater", help="Bake the updater script with config values")
+    parser_bake.add_argument("--server", action="store_true", help="Bake server-updater.py instead of client-updater.py (no exe)")
+
+    # build-exe
+    subparsers.add_parser("build-exe", help="Build releases/client-updater.exe from the baked client updater")
+
+    # export-cf
+    parser_export_cf = subparsers.add_parser("export-cf", help="Build a CurseForge-format modpack zip for a version")
+    parser_export_cf.add_argument("version", help="Version to export")
+
+    # export-example
+    subparsers.add_parser("export-example", help="Write modpackctl.toml.example from the built-in defaults")
+
+    args = parser.parse_args()
+
+    if args.command == "init":
+        init(args.zip, args.force)
+
+    elif args.command == "commit":
+        commit(args.zip, args.major, message=args.message)
+
+    elif args.command == "log":
         show_log()
 
-    elif cmd == "changelog":
-        if len(sys.argv) < 3:
-            print("Usage: changelog <v2> [output.md] [--server] [--message \"...\"]")
-            print("   or: changelog <v1> <v2> [output.md] [--server] [--message \"...\"]")
-            sys.exit(1)
-
-        cl_message = ""
-        if "--message" in sys.argv:
-            message_index = sys.argv.index("--message")
-            if message_index + 1 < len(sys.argv):
-                cl_message = sys.argv[message_index + 1]
-
-        cl_exclude: set[str] | None = None
-        cl_exclude_categories: set[str] | None = None
-        if "--server" in sys.argv:
-            cl_exclude = get_filter_list("client_only")
+    elif args.command == "changelog":
+        if args.server:
+            cl_exclude            = get_filter_list("client_only")
             cl_exclude_categories = {"shaderpacks", "resourcepacks"}
         else:
-            cl_exclude = get_filter_list("server_only")
+            cl_exclude            = get_filter_list("server_only")
+            cl_exclude_categories = None
+        changelog(args.v1, args.v2, out=args.out, message=args.message,
+                  exclude=cl_exclude, exclude_categories=cl_exclude_categories)
 
-        clean_args = [
-            arg for arg in sys.argv[3:]
-            if arg not in ("--message", "--server") and arg != cl_message
-        ]
-
-        if not clean_args:
-            changelog(sys.argv[2], v2=None, out="changelog.md", message=cl_message,
-                      exclude=cl_exclude, exclude_categories=cl_exclude_categories)
-        elif len(clean_args) == 1:
-            if clean_args[0].lower().endswith(".md"):
-                changelog(sys.argv[2], v2=None, out=clean_args[0], message=cl_message,
-                          exclude=cl_exclude, exclude_categories=cl_exclude_categories)
-            else:
-                changelog(sys.argv[2], clean_args[0], out="changelog.md", message=cl_message,
-                          exclude=cl_exclude, exclude_categories=cl_exclude_categories)
+    elif args.command == "release":
+        if args.server:
+            release_server(args.version)
         else:
-            changelog(sys.argv[2], clean_args[0], out=clean_args[1], message=cl_message,
-                      exclude=cl_exclude, exclude_categories=cl_exclude_categories)
+            release_client(args.version)
 
-    elif cmd == "release":
-        if len(sys.argv) < 3:
-            print("Usage: release <version> [--server]")
-            sys.exit(1)
-        if "--server" in sys.argv:
-            release_server(sys.argv[2])
-        else:
-            release_client(sys.argv[2])
+    elif args.command == "publish":
+        publish(args.version, message=args.message)
 
-    elif cmd == "publish":
-        if len(sys.argv) < 3:
-            print("Usage: publish <version> [--message \"...\"]")
-            sys.exit(1)
-        pub_message = ""
-        if "--message" in sys.argv:
-            message_index = sys.argv.index("--message")
-            if message_index + 1 < len(sys.argv):
-                pub_message = sys.argv[message_index + 1]
-        publish(sys.argv[2], message=pub_message)
-
-    elif cmd == "update":
-        if len(sys.argv) < 3:
-            print("Usage: update <version> [--server]")
-            sys.exit(1)
-        if "--server" in sys.argv:
+    elif args.command == "update":
+        if args.server:
             excluded = get_filter_list("client_only")
-            update(sys.argv[2], exclude=excluded, exclude_categories={"shaderpacks", "resourcepacks"}, suffix="server")
+            update(args.version, exclude=excluded, exclude_categories={"shaderpacks", "resourcepacks"}, suffix="server")
         else:
             excluded = get_filter_list("server_only")
-            update(sys.argv[2], exclude=excluded, suffix="client")
+            update(args.version, exclude=excluded, suffix="client")
 
-    elif cmd == "purge":
-        purge_cache("--all" in sys.argv)
+    elif args.command == "purge":
+        purge_cache(args.all)
 
-    elif cmd == "build-exe":
-        build_exe()
-
-    elif cmd == "build-pages":
+    elif args.command == "build-pages":
         build_pages()
 
-    elif cmd == "bake-updater":
-        if "--server" in sys.argv:
+    elif args.command == "bake-updater":
+        if args.server:
             if not bake_server_updater():
                 print(f"[ERROR] Bake failed — is {SERVER_UPDATE_SCRIPT} present in the project root?")
                 sys.exit(1)
-            print(f"[OK] Baked {_baked_server_updater_path()}")
         else:
             if not bake_client_updater():
                 print(f"[ERROR] Bake failed — is {CLIENT_UPDATE_SCRIPT} present in the project root?")
                 sys.exit(1)
-            print(f"[OK] Baked {_baked_client_updater_path()}")
 
-    elif cmd == "export-cf":
-        if len(sys.argv) < 3:
-            print("Usage: export-cf <version>")
-            sys.exit(1)
-        if not export_cf(sys.argv[2]):
+    elif args.command == "build-exe":
+        build_exe()
+
+    elif args.command == "export-cf":
+        if not export_cf(args.version):
             sys.exit(1)
 
-    elif cmd == "export-example":
+    elif args.command == "export-example":
         example_path = Path("modpackctl.toml.example")
         example_path.write_text(DEFAULT_CONFIG, encoding="utf-8")
         print(f"[OK] Written to {example_path}")
-
-    else:
-        print(f"Unknown command: {cmd}\n")
-        print(USAGE)
-        sys.exit(1)

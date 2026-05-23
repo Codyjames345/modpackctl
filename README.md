@@ -89,8 +89,8 @@ python modpackctl.py publish 1.2.0 --message "Improved performance and fixed cra
 | `init <zip> [--force]` | Initialize from a CurseForge export zip. `--force` resets history but keeps the download cache. |
 | `commit <zip> [--major] [--message "..."]` | Record a new version from an updated export. Version is bumped automatically. `--major` forces a major bump. `--message` sets the release note shown to players in the updater changelog. |
 | `log` | List all committed versions with diff stats. |
-| `changelog <v1> [output.md] [--server]` | Generate a client changelog for `v1` as an initial release. `--server` excludes client-only mods, shaderpacks, and resourcepacks. |
-| `changelog <v1> <v2> [output.md] [--server]` | Generate a client changelog between two versions. `--server` excludes client-only mods, shaderpacks, and resourcepacks. |
+| `changelog <v1> [--out output.md] [--server]` | Generate a client changelog for `v1` as an initial release. `--server` excludes client-only mods, shaderpacks, and resourcepacks. |
+| `changelog <v1> <v2> [--out output.md] [--server]` | Generate a client changelog between two versions. `--server` excludes client-only mods, shaderpacks, and resourcepacks. |
 | `release <version> [--server]` | Build a client release zip and CurseForge export zip, bake `releases/{file_prefix}-client-updater.py`, and build `releases/{file_prefix}-client-updater.exe` (if PyInstaller is available). `--server` builds a server release zip and bakes `releases/{file_prefix}-server-updater.py` instead (no exe, no CurseForge zip). |
 | `publish <version> [--message "..."]` | Build a client release, create a GitHub Release with client-filtered changelog notes, and push `versions.json` and `snapshots/` to `gh-pages`. Uploads the zip, baked `.py`, and `.exe` (if built). `--message` overrides the message set at `commit` time. |
 | `update <version> [--server]` | Rebuild the `build/` folder for a version without zipping. Defaults to client view; `--server` excludes client-only mods, shaderpacks, and resourcepacks. |
