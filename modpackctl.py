@@ -54,11 +54,11 @@ SERVER_UPDATE_SCRIPT = Path("server-updater.py")   # working copy; customise for
 _DANCE_DEFAULT_URL  = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
 
 _GITIGNORE_ENTRIES  = [
-    "build/",
-    "releases/",
-    ".modpackctl/dl_cache/",
-    ".pyinstaller/",
-    "gh-pages/"
+    "# Ignore all files/folders by default",
+    "/*",
+    "!/README.md",
+    "!/LICENSE",
+    "!/.gitignore"
 ]
 
 

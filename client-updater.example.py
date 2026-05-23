@@ -1294,21 +1294,40 @@ class UpdaterApp(tk.Tk):
 
             changes     = diff_snapshots(self.old_snapshot, self.new_snapshot)
             num_added   = len(changes["added"])
-            num_removed = len(changes["removed"])
             num_updated = len(changes["updated"])
+
+            # On fresh install, show existing files that Phase 0 will wipe.
+            existing_files: list[str] = []
+            if self.fresh_install and self.modpack_dir is not None:
+                for category in ("mods", "shaderpacks", "resourcepacks"):
+                    category_dir = self.modpack_dir / category
+                    if category_dir.is_dir():
+                        for f in sorted(category_dir.iterdir(), key=lambda p: p.name.lower()):
+                            existing_files.append(f.name)
+            num_removed = len(existing_files) if self.fresh_install else len(changes["removed"])
 
             stats_row = tk.Frame(frame, bg=DARK_BG)
             stats_row.pack()
-            for label_text, colour in (
-                (str(num_added),   GREEN),
-                (" added",         TEXT_DIM),
-                ("  ·  ",          TEXT_DIM),
-                (str(num_removed), RED),
-                (" removed",       TEXT_DIM),
-                ("  ·  ",          TEXT_DIM),
-                (str(num_updated), YELLOW),
-                (" updated",       TEXT_DIM),
-            ):
+            if self.fresh_install:
+                stat_items = (
+                    (str(num_added),   GREEN),
+                    (" to download",   TEXT_DIM),
+                    ("  ·  ",          TEXT_DIM),
+                    (str(num_removed), RED),
+                    (" to delete",     TEXT_DIM),
+                )
+            else:
+                stat_items = (
+                    (str(num_added),   GREEN),
+                    (" added",         TEXT_DIM),
+                    ("  ·  ",          TEXT_DIM),
+                    (str(num_removed), RED),
+                    (" removed",       TEXT_DIM),
+                    ("  ·  ",          TEXT_DIM),
+                    (str(num_updated), YELLOW),
+                    (" updated",       TEXT_DIM),
+                )
+            for label_text, colour in stat_items:
                 tk.Label(
                     stats_row, text=label_text,
                     font=FONT_BODY, bg=DARK_BG, fg=colour, pady=8,
@@ -1346,31 +1365,49 @@ class UpdaterApp(tk.Tk):
 
             text.config(state="normal")
 
-            text.insert("end", "Added\n", "section_added")
-            text.insert("end", "\n")
-            if changes["added"]:
-                for _, entry in changes["added"]:
-                    text.insert("end", f"  - {entry['name']}\n", "added")
-            else:
-                text.insert("end", "  No mods added.\n", "placeholder")
-            text.insert("end", "\n")
+            if self.fresh_install:
+                text.insert("end", "To Download\n", "section_added")
+                text.insert("end", "\n")
+                if changes["added"]:
+                    for _, entry in changes["added"]:
+                        text.insert("end", f"  - {entry['name']}\n", "added")
+                else:
+                    text.insert("end", "  No mods to download.\n", "placeholder")
+                text.insert("end", "\n")
 
-            text.insert("end", "Removed\n", "section_removed")
-            text.insert("end", "\n")
-            if changes["removed"]:
-                for _, entry in changes["removed"]:
-                    text.insert("end", f"  - {entry['name']}\n", "removed")
+                text.insert("end", "To Delete\n", "section_removed")
+                text.insert("end", "\n")
+                if existing_files:
+                    for filename in existing_files:
+                        text.insert("end", f"  - {filename}\n", "removed")
+                else:
+                    text.insert("end", "  No existing files to delete.\n", "placeholder")
             else:
-                text.insert("end", "  No mods removed.\n", "placeholder")
-            text.insert("end", "\n")
+                text.insert("end", "Added\n", "section_added")
+                text.insert("end", "\n")
+                if changes["added"]:
+                    for _, entry in changes["added"]:
+                        text.insert("end", f"  - {entry['name']}\n", "added")
+                else:
+                    text.insert("end", "  No mods added.\n", "placeholder")
+                text.insert("end", "\n")
 
-            text.insert("end", "Updated\n", "section_updated")
-            text.insert("end", "\n")
-            if changes["updated"]:
-                for _, _, new_entry in changes["updated"]:
-                    text.insert("end", f"  - {new_entry['name']}\n", "updated")
-            else:
-                text.insert("end", "  No mods updated.\n", "placeholder")
+                text.insert("end", "Removed\n", "section_removed")
+                text.insert("end", "\n")
+                if changes["removed"]:
+                    for _, entry in changes["removed"]:
+                        text.insert("end", f"  - {entry['name']}\n", "removed")
+                else:
+                    text.insert("end", "  No mods removed.\n", "placeholder")
+                text.insert("end", "\n")
+
+                text.insert("end", "Updated\n", "section_updated")
+                text.insert("end", "\n")
+                if changes["updated"]:
+                    for _, _, new_entry in changes["updated"]:
+                        text.insert("end", f"  - {new_entry['name']}\n", "updated")
+                else:
+                    text.insert("end", "  No mods updated.\n", "placeholder")
 
             text.config(state="disabled")
 
@@ -1380,8 +1417,9 @@ class UpdaterApp(tk.Tk):
             self._secondary_button(
                 button_row, "←  Back", self._show_version_options,
             ).pack(side="right", padx=(10, 0))
+            confirm_label = "Confirm & Reset  →" if self.fresh_install else "Confirm & Update  →"
             self._primary_button(
-                button_row, "Confirm & Update  →", self._show_updating,
+                button_row, confirm_label, self._show_updating,
             ).pack(side="right")
             return frame
         self._swap_frame(build)
