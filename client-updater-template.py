@@ -790,10 +790,20 @@ class UpdaterApp(tk.Tk):
         dialog = tk.Toplevel(self)
         dialog.title("Settings")
         dialog.configure(bg=DARK_BG)
-        dialog.geometry("620x580")
-        dialog.resizable(False, False)
+        saved_settings_geo = self.prefs.get("settings_geometry")
+        if saved_settings_geo:
+            dialog.geometry(saved_settings_geo)
+        else:
+            dialog.geometry("620x580")
+        dialog.resizable(True, True)
         dialog.transient(self)
         dialog.grab_set()
+
+        def _on_settings_close(event: tk.Event) -> None:
+            if event.widget is dialog:
+                self.prefs["settings_geometry"] = dialog.geometry()
+                save_prefs(self.prefs)
+        dialog.bind("<Destroy>", _on_settings_close)
 
         current_colours: dict[str, str] = {**_COLOUR_DEFAULTS, **self.prefs.get("colours", {})}
         colour_vars: dict[str, tk.StringVar] = {}
