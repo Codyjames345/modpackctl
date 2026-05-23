@@ -743,12 +743,21 @@ def commit(source: str, major: bool = False, message: str = "") -> tuple[str, st
 # -------------------------
 
 
-def changelog(v1: str, v2: str | None, out: str = "changelog.md", message: str = "") -> None:
+def changelog(
+    v1: str,
+    v2: str | None,
+    out: str = "changelog.md",
+    message: str = "",
+    exclude: set[str] | None = None,
+    exclude_categories: set[str] | None = None,
+) -> None:
     """
     Generate a Markdown changelog between two committed versions and write it to a file.
     When v2 is None, v1 is treated as an initial release and diffed against an empty state.
     Includes a Modloader section when the modloader id changed between the two versions.
     An optional message is inserted as a short paragraph below the heading.
+    exclude filters out specific project IDs; exclude_categories filters by mod category
+    (e.g. 'shaderpacks', 'resourcepacks') using the stored mod index.
     """
     if v2 is None:
         v2 = v1
@@ -762,8 +771,24 @@ def changelog(v1: str, v2: str | None, out: str = "changelog.md", message: str =
     new_entry     = get_log_entry(v2)
     new_modloader = new_entry.get("modloader", "") if new_entry else ""
 
+    excluded_ids   = {str(project_id) for project_id in exclude} if exclude else set()
+    existing_index = load_index() if (excluded_ids or exclude_categories) else {}
+
+    def apply_side_filter(snapshot: dict) -> dict:
+        if not excluded_ids and not exclude_categories:
+            return snapshot
+        return {
+            project_id: value
+            for project_id, value in snapshot.items()
+            if project_id not in excluded_ids
+            and (
+                not exclude_categories
+                or existing_index.get(project_id, {}).get("category", "mods") not in exclude_categories
+            )
+        }
+
     if v1 == "EMPTY":
-        changes       = diff({}, load_snapshot(new_commit_id))
+        changes       = diff({}, apply_side_filter(load_snapshot(new_commit_id)))
         header_title  = f"# Changelog: {v2} (Initial Release)"
         old_modloader = ""
     else:
@@ -771,7 +796,10 @@ def changelog(v1: str, v2: str | None, out: str = "changelog.md", message: str =
         if not old_commit_id:
             print(f"[ERROR] Version '{v1}' not found in log.")
             return
-        changes       = diff(load_snapshot(old_commit_id), load_snapshot(new_commit_id))
+        changes       = diff(
+            apply_side_filter(load_snapshot(old_commit_id)),
+            apply_side_filter(load_snapshot(new_commit_id)),
+        )
         header_title  = f"# Changelog: {v1} → {v2}"
         old_entry     = get_log_entry(v1)
         old_modloader = old_entry.get("modloader", "") if old_entry else ""
@@ -1118,12 +1146,21 @@ def _build_versions_json() -> dict:
     return {"latest": log[-1]["version"] if log else None, "versions": versions}
 
 
-def _get_notes_file_for_release(version: str, message: str = "") -> Path:
+def _get_notes_file_for_release(version: str, message: str = "", side: str = "") -> Path:
     """
     Generate a temporary Markdown changelog file for the given version.
     Diffs against the previous version if one exists, otherwise treats it as an initial release.
-    The caller is responsible for deleting this file after use.
+    side='client' excludes server_only mods; side='server' excludes client_only mods and
+    non-mod categories. The caller is responsible for deleting this file after use.
     """
+    release_exclude: set[str] | None = None
+    release_exclude_categories: set[str] | None = None
+    if side == "client":
+        release_exclude = get_filter_list("server_only")
+    elif side == "server":
+        release_exclude = get_filter_list("client_only")
+        release_exclude_categories = {"shaderpacks", "resourcepacks"}
+
     log          = load_log()
     prev_version = None
     for index in range(len(log) - 1, -1, -1):
@@ -1134,9 +1171,11 @@ def _get_notes_file_for_release(version: str, message: str = "") -> Path:
     notes_path = Path(f".modpackctl_notes_{version}.md")
     if prev_version:
         print(f"Generating notes comparing {prev_version} → {version}...")
-        changelog(prev_version, version, out=str(notes_path), message=message)
+        changelog(prev_version, version, out=str(notes_path), message=message,
+                  exclude=release_exclude, exclude_categories=release_exclude_categories)
     else:
-        changelog(version, None, out=str(notes_path), message=message)
+        changelog(version, None, out=str(notes_path), message=message,
+                  exclude=release_exclude, exclude_categories=release_exclude_categories)
 
     return notes_path
 
@@ -1240,11 +1279,61 @@ def _push_pages_assets() -> None:
         raise
 
 
+def _has_client_changes(version: str) -> bool:
+    """
+    Return True if the given version has any client-visible changes compared to
+    the previous version. Server-only mods (from the server_only config list) are
+    excluded from the comparison. An initial release (no previous version) always
+    returns True.
+    """
+    log = load_log()
+    new_entry    = None
+    prev_version = None
+    for index in range(len(log) - 1, -1, -1):
+        if str(log[index]["version"]) == str(version):
+            new_entry    = log[index]
+            prev_version = log[index - 1]["version"] if index > 0 else None
+            break
+
+    if new_entry is None or prev_version is None:
+        return True  # initial release always counts as a change
+
+    prev_entry    = get_log_entry(prev_version)
+    old_modloader = prev_entry.get("modloader", "") if prev_entry else ""
+    new_modloader = new_entry.get("modloader", "")
+    modloader_changed = bool(old_modloader and new_modloader and old_modloader != new_modloader)
+    if modloader_changed:
+        return True
+
+    server_only_ids = get_filter_list("server_only")
+
+    def apply_client_filter(snapshot: dict) -> dict:
+        if not server_only_ids:
+            return snapshot
+        return {
+            project_id: value
+            for project_id, value in snapshot.items()
+            if project_id not in server_only_ids
+        }
+
+    old_commit_id = get_commit(prev_version)
+    new_commit_id = new_entry["commit"]
+    if not old_commit_id:
+        return True
+
+    changes = diff(
+        apply_client_filter(load_snapshot(old_commit_id)),
+        apply_client_filter(load_snapshot(new_commit_id)),
+    )
+    return bool(changes["added"] or changes["removed"] or changes["updated"])
+
+
 def publish(version: str, message: str = "") -> None:
     """
     Build a fresh client release zip, create a GitHub Release with the generated
     changelog as release notes, and push updated versions.json to gh-pages.
     An optional message is included at the top of the release notes.
+    Aborts if the version has no client-visible changes (e.g. only server-only mods changed).
     """
     if not REPO.exists():
         print("[ERROR] Repository not initialized. Run 'init' first.")
@@ -1255,6 +1344,12 @@ def publish(version: str, message: str = "") -> None:
     log_entry = get_log_entry(version)
     if not log_entry:
         print(f"[ERROR] Version '{version}' not found in log.")
+        sys.exit(1)
+
+    if not _has_client_changes(version):
+        print(f"[ERROR] v{version} has no client-visible changes — nothing to publish.")
+        print("        All changes in this version are server-only mods.")
+        print("        Use 'release --server' if you need a server-side release.")
         sys.exit(1)
 
     if not message:
@@ -1268,7 +1363,7 @@ def publish(version: str, message: str = "") -> None:
         print("[ERROR] Release build failed — cannot publish.")
         sys.exit(1)
 
-    notes_path = _get_notes_file_for_release(version, message=message)
+    notes_path = _get_notes_file_for_release(version, message=message, side="client")
     tag        = f"v{version}"
 
     baked_updater_path = RELEASES / "client-updater.py"
@@ -1445,7 +1540,8 @@ Commands:
   init          <zip> [--force]                     Initialise repo from a CurseForge export zip
   commit        <zip> [--major] [--message "..."]   Record a new version; --message sets the release note shown to players
   log                                               List all committed versions
-  changelog     <v1> <v2> [out] [--message "..."]   Write a changelog between two versions
+  changelog     <v2> [out] [--client|--server] [--message "..."]        Write a changelog for v2 as an initial release
+  changelog     <v1> <v2> [out] [--client|--server] [--message "..."]   Write a changelog between two versions
   release       <version> [--client|--server]       Build a release zip
   publish       <version> [--message "..."]         Build client release + push to GitHub (--message overrides the committed message)
   update        <version> [--client|--server]       Rebuild the build folder for a version
@@ -1486,8 +1582,8 @@ if __name__ == "__main__":
 
     elif cmd == "changelog":
         if len(sys.argv) < 3:
-            print("Usage: changelog <v2> [output.md]")
-            print("   or: changelog <v1> <v2> [output.md]")
+            print("Usage: changelog <v2> [output.md] [--client|--server] [--message \"...\"]")
+            print("   or: changelog <v1> <v2> [output.md] [--client|--server] [--message \"...\"]")
             sys.exit(1)
 
         cl_message = ""
@@ -1495,17 +1591,33 @@ if __name__ == "__main__":
             message_index = sys.argv.index("--message")
             if message_index + 1 < len(sys.argv):
                 cl_message = sys.argv[message_index + 1]
-        clean_args = [arg for arg in sys.argv[3:] if arg != "--message" and arg != cl_message]
+
+        cl_exclude: set[str] | None = None
+        cl_exclude_categories: set[str] | None = None
+        if "--client" in sys.argv:
+            cl_exclude = get_filter_list("server_only")
+        elif "--server" in sys.argv:
+            cl_exclude = get_filter_list("client_only")
+            cl_exclude_categories = {"shaderpacks", "resourcepacks"}
+
+        clean_args = [
+            arg for arg in sys.argv[3:]
+            if arg not in ("--message", "--client", "--server") and arg != cl_message
+        ]
 
         if not clean_args:
-            changelog(sys.argv[2], v2=None, out="changelog.md", message=cl_message)
+            changelog(sys.argv[2], v2=None, out="changelog.md", message=cl_message,
+                      exclude=cl_exclude, exclude_categories=cl_exclude_categories)
         elif len(clean_args) == 1:
             if clean_args[0].lower().endswith(".md"):
-                changelog(sys.argv[2], v2=None, out=clean_args[0], message=cl_message)
+                changelog(sys.argv[2], v2=None, out=clean_args[0], message=cl_message,
+                          exclude=cl_exclude, exclude_categories=cl_exclude_categories)
             else:
-                changelog(sys.argv[2], clean_args[0], out="changelog.md", message=cl_message)
+                changelog(sys.argv[2], clean_args[0], out="changelog.md", message=cl_message,
+                          exclude=cl_exclude, exclude_categories=cl_exclude_categories)
         else:
-            changelog(sys.argv[2], clean_args[0], out=clean_args[1], message=cl_message)
+            changelog(sys.argv[2], clean_args[0], out=clean_args[1], message=cl_message,
+                      exclude=cl_exclude, exclude_categories=cl_exclude_categories)
 
     elif cmd == "release":
         if len(sys.argv) < 3:
