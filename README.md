@@ -110,16 +110,41 @@ After this, `modpackctl <Tab>` completes subcommands and `modpackctl commit <Tab
 
 ## Setup
 
-1. Copy `modpackctl.toml.example` to `modpackctl.toml` (or one will be created automatically) and fill in your GitHub details:
+1. Create an empty folder for your modpack project and open a terminal there.
+
+2. Export your modpack from CurseForge (the `.zip` file) and note its path.
+
+3. Run the `init` command. Because no `modpackctl.toml` exists yet, modpackctl will prompt you to initialize the working directory first — this creates `modpackctl.toml` and a git repo, then exits:
+
+```
+modpackctl init MyModpack-1.0.0.zip
+```
+
+```
+No modpackctl.toml found in the current directory.
+Initialize a working directory here? (This will also create a git repo.) [y/N] y
+[OK] Copied modpackctl.toml.example → modpackctl.toml
+...
+Working directory initialized. Edit modpackctl.toml then re-run your command.
+```
+
+4. Edit `modpackctl.toml` and fill in your GitHub details:
 
 ```toml
 [github]
 user = "YourGitHubUsername"
 repo = "YourRepoName"
+```
 
+5. Change any of the other options to personalise your modpack:
+
+```
 [settings]
 # Display name shown in the updater GUI and used as the release zip prefix
-modpack_name = "YourModpackName"
+modpack_name = "<YourModpackName>"
+
+# Optional: override the zip file prefix if it should differ from modpack_name
+# file_prefix = "<YourModpackName>"
 
 # Modpack author shown in the CurseForge export manifest.json
 # author = "YourName"
@@ -127,14 +152,11 @@ modpack_name = "YourModpackName"
 # RAM recommended to players in MB (shown in CurseForge launcher, optional)
 # recommended_ram = 8192
 
-# Optional: override the zip file prefix if it should differ from modpack_name
-# file_prefix = "YourModpackName"
-
 # URL to a logo image shown in the updater header and used as the modpack image in CurseForge exports (optional; PNG or GIF)
 # logo_url = "https://example.com/logo.png"
 
 # Whether to include the Konami code easter egg (optional; default: true)
-# enable_secret = true
+# enable_secret = false
 
 # YouTube URL for the secret easter egg video (optional; defaults to Never Gonna Give You Up)
 # secret_video_url = "https://www.youtube.com/watch?v=..."
@@ -149,12 +171,17 @@ server_only = [123456, 789012]
 client_only = [345678]
 ```
 
-2. Export your modpack from CurseForge (the `.zip` file).
-
-3. Initialize the repository:
+5. Re-run `init` to import your first modpack version and initialize the version history:
 
 ```
-python modpackctl.py init MyModpack-1.0.0.zip
+modpackctl init MyModpack-1.0.0.zip
+```
+
+6. Once modpackctl prints the remote setup reminder, add your GitHub remote and push:
+
+```
+git remote add origin https://github.com/<user>/<repo>.git
+git push -u origin main
 ```
 
 ## Typical Workflow

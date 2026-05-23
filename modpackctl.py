@@ -53,6 +53,14 @@ CLIENT_UPDATE_SCRIPT = Path("client-updater-template.py")   # client updater sou
 SERVER_UPDATE_SCRIPT = Path("server-updater-template.py")   # server updater source template
 _DANCE_DEFAULT_URL  = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
 
+_GITIGNORE_ENTRIES  = [
+    "build/",
+    "releases/",
+    ".modpackctl/dl_cache/",
+    ".pyinstaller/",
+    "gh-pages/"
+]
+
 
 def _baked_client_updater_path() -> Path:
     """Return releases/{file_prefix}-client-updater.py — the baked client updater output."""
@@ -116,12 +124,72 @@ client_only = []
 
 
 def load_config() -> dict:
-    """Load and return the TOML config, creating a default file if none exists."""
+    """Load and return the TOML config. Exits with an error if the file does not exist."""
     if not CONFIG_FILE.exists():
-        print(f"[WARN] Config file not found. Creating {CONFIG_FILE} with defaults...")
-        CONFIG_FILE.write_text(DEFAULT_CONFIG, encoding="utf-8")
+        print(f"[ERROR] {CONFIG_FILE} not found. Run modpackctl from a working directory, or re-run to initialize one.")
+        sys.exit(1)
     with open(CONFIG_FILE, "rb") as fh:
         return tomllib.load(fh)
+
+
+def _init_git_repo() -> None:
+    """
+    Ensure the current directory is a git repository with a suitable .gitignore.
+    Skips git init if already inside a repo. Appends any missing entries to an
+    existing .gitignore rather than overwriting it.
+    """
+    already_git = subprocess.run(
+        ["git", "rev-parse", "--is-inside-work-tree"],
+        capture_output=True,
+    ).returncode == 0
+
+    if not already_git:
+        subprocess.run(["git", "init"], check=True)
+        print("[OK] Initialized git repository.")
+
+    gitignore = Path(".gitignore")
+    if not gitignore.exists():
+        gitignore.write_text("\n".join(_GITIGNORE_ENTRIES) + "\n", encoding="utf-8")
+        print("[OK] Created .gitignore.")
+    else:
+        existing_lines = set(gitignore.read_text(encoding="utf-8").splitlines())
+        missing = [e for e in _GITIGNORE_ENTRIES if e not in existing_lines]
+        if missing:
+            with open(gitignore, "a", encoding="utf-8") as fh:
+                fh.write("\n".join(missing) + "\n")
+            print("[OK] Updated .gitignore with modpackctl entries.")
+
+    if not already_git:
+        print("[INFO] Once you've created the GitHub repo and edited the config, add a remote:")
+        print("       git remote add origin https://github.com/<user>/<repo>.git")
+
+
+def _init_working_dir() -> None:
+    """
+    If no modpackctl.toml exists in the current directory, prompt the user to initialize
+    a working directory here. On confirmation, copies modpackctl.toml.example and both
+    updater templates from the script directory, initializes a git repo, then exits so
+    the user can edit the config.
+    """
+    if CONFIG_FILE.exists():
+        return
+    print(f"No {CONFIG_FILE} found in the current directory.")
+    answer = input("Initialize a working directory here? (This will also create a git repo.) [y/N] ").strip().lower()
+    if answer not in ("y", "yes"):
+        print("[INFO] Aborted.")
+        sys.exit(0)
+    src_config = _HERE / CONFIG_EXAMPLE.name
+    if src_config.exists():
+        shutil.copy2(src_config, CONFIG_FILE)
+        print(f"[OK] Copied {CONFIG_EXAMPLE.name} → {CONFIG_FILE}")
+    else:
+        CONFIG_FILE.write_text(DEFAULT_CONFIG, encoding="utf-8")
+        print(f"[OK] Created {CONFIG_FILE} with defaults.")
+    _ensure_template(CLIENT_UPDATE_SCRIPT)
+    _ensure_template(SERVER_UPDATE_SCRIPT)
+    _init_git_repo()
+    print(f"\nWorking directory initialized. Edit {CONFIG_FILE} then re-run your command.")
+    sys.exit(0)
 
 
 def get_github_info() -> tuple[str, str]:
@@ -2032,7 +2100,7 @@ def show_log() -> None:
 # -------------------------
 
 if __name__ == "__main__":
-    load_config()  # ensure modpackctl.toml exists on every run
+    _init_working_dir()
 
     parser = argparse.ArgumentParser(
         prog="modpackctl",
