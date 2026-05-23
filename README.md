@@ -27,10 +27,16 @@ repo = "YourRepoName"
 # Display name shown in the updater GUI and used as the release zip prefix
 modpack_name = "YourModpackName"
 
+# Modpack author shown in the CurseForge export manifest.json
+# author = "YourName"
+
+# RAM recommended to players in MB (shown in CurseForge launcher, optional)
+# recommended_ram = 8192
+
 # Optional: override the zip file prefix if it should differ from modpack_name
 # file_prefix = "YourModpackName"
 
-# URL to a logo image shown in the updater header (optional; PNG or GIF, ~32px tall)
+# URL to a logo image shown in the updater header and used as the modpack image in CurseForge exports (optional; PNG or GIF)
 # logo_url = "https://example.com/logo.png"
 
 # Whether to include the Konami code easter egg (optional; default: true)
@@ -85,13 +91,14 @@ python modpackctl.py publish 1.2.0 --message "Improved performance and fixed cra
 | `log` | List all committed versions with diff stats. |
 | `changelog <v1> [output.md] [--server]` | Generate a client changelog for `v1` as an initial release. `--server` excludes client-only mods, shaderpacks, and resourcepacks. |
 | `changelog <v1> <v2> [output.md] [--server]` | Generate a client changelog between two versions. `--server` excludes client-only mods, shaderpacks, and resourcepacks. |
-| `release <version> [--server]` | Build a client release zip, bake `releases/{file_prefix}-client-updater.py`, and build `releases/{file_prefix}-client-updater.exe` (if PyInstaller is available). `--server` builds a server release zip and bakes `releases/{file_prefix}-server-updater.py` instead (no exe). |
+| `release <version> [--server]` | Build a client release zip and CurseForge export zip, bake `releases/{file_prefix}-client-updater.py`, and build `releases/{file_prefix}-client-updater.exe` (if PyInstaller is available). `--server` builds a server release zip and bakes `releases/{file_prefix}-server-updater.py` instead (no exe, no CurseForge zip). |
 | `publish <version> [--message "..."]` | Build a client release, create a GitHub Release with client-filtered changelog notes, and push `versions.json` and `snapshots/` to `gh-pages`. Uploads the zip, baked `.py`, and `.exe` (if built). `--message` overrides the message set at `commit` time. |
 | `update <version> [--server]` | Rebuild the `build/` folder for a version without zipping. Defaults to client view; `--server` excludes client-only mods, shaderpacks, and resourcepacks. |
 | `purge [--all]` | Remove stale files from the download cache. Without `--all`, only removes mods not in the latest snapshot. |
 | `build-pages` | Write `versions.json` and `snapshots/` to a local `gh-pages/` folder. Useful for manually pushing to `gh-pages` if `publish` fails. |
 | `bake-updater [--server]` | Bake `releases/{file_prefix}-client-updater.py` from the client updater template. `--server` bakes `releases/{file_prefix}-server-updater.py` instead (no exe). |
 | `build-exe` | Build `releases/{file_prefix}-client-updater.exe` from the baked client updater using PyInstaller. When `enable_secret` is true, also downloads and bundles the easter egg video and audio. Requires `pip install pyinstaller yt-dlp imageio-ffmpeg Pillow`. Also runs automatically as part of `release`. |
+| `export-cf <version>` | Build a CurseForge-format modpack zip for the given version, suitable for importing directly into the CurseForge launcher. Includes `manifest.json`, `modlist.html`, and the stored overrides with `bcc-common.toml` stamped with the correct version. |
 | `export-example` | Write the built-in config template to `modpackctl.toml.example`. |
 
 ## Version Bumping
@@ -147,12 +154,14 @@ Run `build-exe` to compile the `.exe` from an already-baked script.
 
 To enable exe building, install the build dependencies once: `pip install pyinstaller yt-dlp imageio-ffmpeg Pillow`
 
-**Distribution:** `publish` uploads up to three assets to the GitHub Release: the modpack zip, `{file_prefix}-client-updater.py`, and `{file_prefix}-client-updater.exe` (if the PyInstaller build succeeded). `publish` also pushes enriched snapshots (with mod names) to the `gh-pages` branch so the changelog displays real names like "Sodium" instead of project IDs.
+**Distribution:** `publish` uploads up to four assets to the GitHub Release: the modpack zip, the CurseForge export zip, `{file_prefix}-client-updater.py`, and `{file_prefix}-client-updater.exe` (if the PyInstaller build succeeded). `publish` also pushes enriched snapshots (with mod names) to the `gh-pages` branch so the changelog displays real names like "Sodium" instead of project IDs.
 
 - **New players** — download and extract the modpack zip, then download either `{file_prefix}-client-updater.exe` (no Python needed) or `{file_prefix}-client-updater.py` (requires Python 3.8+). Save it anywhere — Desktop, Downloads, etc.
 - **Existing players** — re-run their saved updater; the prefs file remembers the modpack folder.
 
 **Player prefs:** the last-selected modpack folder is saved to `~/.modpack-updater/` (namespaced per modpack).
+
+**Better Compatibility Checker integration:** If the [Better Compatibility Checker](https://www.curseforge.com/minecraft/mc-mods/better-compatibility-checker) mod is in the pack, the updater reads and writes the installed version via `config/bcc-common.toml` (`modpackVersion` and `modpackName` fields). If the file is absent it is created automatically on the first update. This keeps the in-game version display in sync with what the updater installs.
 
 **Requirements for players (`.py` version):** Python 3.8+ and an internet connection. The updater itself uses only the standard library. When the easter egg is triggered for the first time, additional packages are installed automatically via pip in the background (`yt-dlp`, `Pillow`, `imageio`, `imageio-ffmpeg`) and the video is downloaded and cached in `~/.modpack-updater/`; players do not need to install anything manually.
 
@@ -175,7 +184,7 @@ python server-updater.py [server_dir] [--version VERSION] [--fresh] [--yes] [--w
 | `--yes` | Skip the confirmation prompt (useful for automated deployments). |
 | `--workers N` | Number of parallel download threads (default: 4). |
 
-The script detects the installed version from `modpack_version.txt` in the server directory and defaults to a fresh install if that file is absent. On success it writes the new version back to `modpack_version.txt`.
+The script detects and records the installed version via `config/bcc-common.toml` (`modpackVersion` field), matching the [Better Compatibility Checker](https://www.curseforge.com/minecraft/mc-mods/better-compatibility-checker) mod format. If the file is absent it is created automatically on the first update. The script defaults to a fresh install if no version is detected.
 
 **Generating:** Run `bake-updater --server` to write `releases/{file_prefix}-server-updater.py` with your GitHub credentials baked in.
 

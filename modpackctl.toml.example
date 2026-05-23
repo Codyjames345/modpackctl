@@ -9,6 +9,12 @@ modpack_name = "<YourModpackName>"
 # Optional: override the zip file prefix if it should differ from modpack_name
 # file_prefix = "<YourModpackName>"
 
+# Modpack author shown in the CurseForge export manifest.json
+# author = "YourName"
+
+# RAM recommended to players in MB (shown in CurseForge launcher, optional)
+# recommended_ram = 8192
+
 # URL to a logo image shown in the updater header (optional; PNG or GIF, ~32px tall)
 # logo_url = "https://example.com/logo.png"
 

@@ -31,7 +31,6 @@ REPO            = Path(".modpackctl")
 SNAPSHOTS       = REPO / "snapshots"
 LOG_FILE        = REPO / "log.json"
 CACHE           = REPO / "mod_cache.json"    # project_id -> { name, files: { file_id: filename } }
-INDEX_FILE      = REPO / "mod_index.json"    # project_id -> { file_id, file, category }
 DL_CACHE        = REPO / "dl_cache"          # permanent jar store keyed by (project_id, file_id)
 OVERRIDES_STORE = REPO / "overrides"
 CONFIG_FILE     = Path("modpackctl.toml")
@@ -78,7 +77,13 @@ modpack_name = "<YourModpackName>"
 # Optional: override the zip file prefix if it should differ from modpack_name
 # file_prefix = "<YourModpackName>"
 
-# URL to a logo image shown in the updater header (optional; PNG or GIF, ~32px tall)
+# Modpack author shown in the CurseForge export manifest.json
+# author = "YourName"
+
+# RAM recommended to players in MB (shown in CurseForge launcher, optional)
+# recommended_ram = 8192
+
+# URL to a logo image shown in the updater header and used as the modpack image in CurseForge exports (optional; PNG or GIF)
 # logo_url = "https://example.com/logo.png"
 
 # Whether to include the Konami code easter egg (optional; default: true)
@@ -166,16 +171,6 @@ def save_json(path: Path, data: _JsonT) -> None:
     path.write_text(json.dumps(data, indent=2))
 
 
-def load_index() -> dict:
-    """Return the mod index mapping project_id -> { file_id, file, category }."""
-    return load_json(INDEX_FILE, {})
-
-
-def save_index(data: dict) -> None:
-    """Persist the mod index to disk."""
-    save_json(INDEX_FILE, data)
-
-
 # -------------------------
 # MANIFEST
 # -------------------------
@@ -231,11 +226,16 @@ def validate_source(source: str) -> None:
         sys.exit(1)
 
 
-def normalize(manifest: dict) -> dict:
-    """Return a flat {project_id: file_id} mapping (both as strings) from a manifest."""
+def build_snapshot(manifest: dict, cache: dict) -> dict:
+    """Build an enriched snapshot dict from a manifest, resolving names from cache where available."""
     return {
-        str(mod_entry["projectID"]): str(mod_entry["fileID"])
-        for mod_entry in manifest.get("files", [])
+        str(mod["projectID"]): {
+            "file_id":  str(mod["fileID"]),
+            "name":     cache.get(str(mod["projectID"]), {}).get("name") or str(mod["projectID"]),
+            "file":     "",
+            "category": "",
+        }
+        for mod in manifest.get("files", [])
     }
 
 
@@ -489,6 +489,7 @@ def add_version(
     removed: int = 0,
     updated: int = 0,
     modloader: str = "",
+    minecraft_version: str = "",
     message: str = "",
 ) -> None:
     """Append a new version entry to the log, including diff stats and optional modloader id."""
@@ -503,6 +504,8 @@ def add_version(
     }
     if modloader:
         entry["modloader"] = modloader
+    if minecraft_version:
+        entry["minecraft_version"] = minecraft_version
     if message:
         entry["message"] = message
     log.append(entry)
@@ -528,19 +531,18 @@ def get_log_entry(version: str) -> dict | None:
 # -------------------------
 
 
-def _snapshot_file_id(value: dict | str) -> str:
-    """Return the file_id from a snapshot entry (dict with file_id key, or a bare string)."""
-    return str(value["file_id"] if isinstance(value, dict) else value)
-
-
 def diff(old: dict, new: dict) -> dict:
     """
     Compute the difference between two mod state dicts.
     Returns a dict with keys 'added' (set), 'removed' (set), and
     'updated' (list of (project_id, old_file_id, new_file_id) tuples).
+    Accepts both enriched {project_id: {file_id, ...}} dicts and legacy {project_id: file_id_str} dicts.
     """
-    old = {str(k): _snapshot_file_id(v) for k, v in old.items()}
-    new = {str(k): _snapshot_file_id(v) for k, v in new.items()}
+    def file_id_of(value: dict | str) -> str:
+        return str(value["file_id"] if isinstance(value, dict) else value)
+
+    old = {str(k): file_id_of(v) for k, v in old.items()}
+    new = {str(k): file_id_of(v) for k, v in new.items()}
 
     added   = new.keys() - old.keys()
     removed = old.keys() - new.keys()
@@ -740,8 +742,7 @@ def init(source: str, force: bool = False) -> None:
         for directory in (OVERRIDES_STORE, SNAPSHOTS):
             if directory.exists():
                 shutil.rmtree(directory, ignore_errors=True)
-        for file_path in (LOG_FILE, INDEX_FILE):
-            file_path.unlink(missing_ok=True)
+        LOG_FILE.unlink(missing_ok=True)
 
     REPO.mkdir(parents=True, exist_ok=True)
     result = commit(source)
@@ -769,10 +770,14 @@ def commit(source: str, major: bool = False, message: str = "") -> tuple[str, st
         print("[ERROR] Repository not initialized. Run 'init' first.")
         sys.exit(1)
 
-    manifest      = load_manifest(source)
-    mods          = normalize(manifest)
-    new_modloader = get_modloader_version(manifest)
-    commit_id     = hash_state(mods)
+    manifest          = load_manifest(source)
+    new_modloader     = get_modloader_version(manifest)
+    minecraft_version = manifest.get("minecraft", {}).get("version", "")
+    bare_mods = {
+        str(mod["projectID"]): str(mod["fileID"])
+        for mod in manifest.get("files", [])
+    }
+    commit_id = hash_state(bare_mods)
 
     log = load_log()
 
@@ -784,7 +789,7 @@ def commit(source: str, major: bool = False, message: str = "") -> tuple[str, st
     old_version   = log[-1]["version"] if log else ""
     old_modloader = log[-1].get("modloader", "") if log else ""
 
-    changes = diff(old_snapshot, mods)
+    changes = diff(old_snapshot, bare_mods)
 
     # Only trigger auto-major if both old and new modloader strings are known;
     # avoids a false positive when the manifest lacks a modLoaders entry.
@@ -799,13 +804,16 @@ def commit(source: str, major: bool = False, message: str = "") -> tuple[str, st
     else:
         version = bump(old_version, changes)
 
-    save_snapshot(commit_id, mods)
+    _prefetch_names({str(mod["projectID"]) for mod in manifest.get("files", [])})
+    snapshot = build_snapshot(manifest, load_json(CACHE, {}))
+    save_snapshot(commit_id, snapshot)
     add_version(
         commit_id, version,
         added=len(changes["added"]),
         removed=len(changes["removed"]),
         updated=len(changes["updated"]),
         modloader=new_modloader,
+        minecraft_version=minecraft_version,
         message=message,
     )
 
@@ -831,7 +839,7 @@ def commit(source: str, major: bool = False, message: str = "") -> tuple[str, st
     if override_count:
         print(f"  {override_count} override file(s) stored.")
 
-    return version, commit_id, len(mods)
+    return version, commit_id, len(snapshot)
 
 
 # -------------------------
@@ -867,19 +875,19 @@ def changelog(
     new_entry     = get_log_entry(v2)
     new_modloader = new_entry.get("modloader", "") if new_entry else ""
 
-    excluded_ids   = {str(project_id) for project_id in exclude} if exclude else set()
-    existing_index = load_index() if (excluded_ids or exclude_categories) else {}
+    excluded_ids = {str(project_id) for project_id in exclude} if exclude else set()
 
     def apply_side_filter(snapshot: dict) -> dict:
         if not excluded_ids and not exclude_categories:
             return snapshot
         return {
-            project_id: value
-            for project_id, value in snapshot.items()
+            project_id: entry
+            for project_id, entry in snapshot.items()
             if project_id not in excluded_ids
             and (
                 not exclude_categories
-                or existing_index.get(project_id, {}).get("category", "mods") not in exclude_categories
+                or ((entry.get("category", "") if isinstance(entry, dict) else "") or "mods")
+                not in exclude_categories
             )
         }
 
@@ -1008,16 +1016,21 @@ def update(
         print(f"[ERROR] Version '{version}' not found.")
         return {"downloaded": 0, "cached": 0, "failed": 0, "ok": 0}
 
-    snapshot       = load_snapshot(commit_id)
-    snapshot_ids   = {project_id: _snapshot_file_id(val) for project_id, val in snapshot.items()}
-    existing_index = load_index()
-    mods_to_build  = {
-        project_id: file_id
-        for project_id, file_id in snapshot_ids.items()
+    snapshot = load_snapshot(commit_id)
+
+    def entry_file_id(entry: dict | str) -> str:
+        return str(entry["file_id"] if isinstance(entry, dict) else entry)
+
+    def entry_category(entry: dict | str) -> str:
+        return (entry.get("category", "") if isinstance(entry, dict) else "") or "mods"
+
+    mods_to_build = {
+        project_id: entry_file_id(entry)
+        for project_id, entry in snapshot.items()
         if project_id not in excluded_ids
         and (
             not exclude_categories
-            or existing_index.get(project_id, {}).get("category", "mods") not in exclude_categories
+            or entry_category(entry) not in exclude_categories
         )
     }
     label = f"v{version}-{suffix}" if suffix else f"v{version}"
@@ -1058,27 +1071,23 @@ def update(
                 failed += 1
                 print(f"  [WARN] [{completed_count}/{total_count}] Failed to get {project_id}: {exc}")
 
-    index = load_index()
-    for result in successful_results:
-        index[result["project_id"]] = {
-            "file_id":  result["file_id"],
-            "file":     result["file"],
-            "category": result["category"],
-        }
-    save_index(index)
-
-    # Update the snapshot with full metadata for every mod we just built.
-    # Excluded and failed mods keep their existing snapshot entry.
+    # Fill file and category into the snapshot for each successfully built mod.
+    # Excluded and failed mods keep their existing snapshot entry unchanged.
     if successful_results:
         cache_data = load_json(CACHE, {})
         for result in successful_results:
             project_id = result["project_id"]
-            snapshot[project_id] = {
-                "file_id":  result["file_id"],
-                "name":     cache_data.get(project_id, {}).get("name") or project_id,
-                "file":     result["file"],
-                "category": result["category"],
-            }
+            existing = snapshot.get(project_id)
+            if isinstance(existing, dict):
+                existing["file"]     = result["file"]
+                existing["category"] = result["category"]
+            else:
+                snapshot[project_id] = {
+                    "file_id":  result["file_id"],
+                    "name":     cache_data.get(project_id, {}).get("name") or project_id,
+                    "file":     result["file"],
+                    "category": result["category"],
+                }
         save_snapshot(commit_id, snapshot)
 
     (BUILD / "modpack_version.txt").write_text(version)
@@ -1165,7 +1174,7 @@ def release(
 
 
 def release_client(version: str) -> Path | None:
-    """Build a client release zip, excluding any mods in the server_only list, and bake client-updater-template.py."""
+    """Build a client release zip and CurseForge export zip, excluding server_only mods, and bake client-updater-template.py."""
     print(f"Building client release for v{version}...")
     excluded = get_filter_list("server_only")
     if not excluded:
@@ -1176,6 +1185,7 @@ def release_client(version: str) -> Path | None:
     if zip_path:
         if bake_client_updater():
             _build_exe(_baked_client_updater_path())
+        export_cf(version)
     return zip_path
 
 
@@ -1189,6 +1199,119 @@ def release_server(version: str) -> Path | None:
     zip_path = release(version, exclude=excluded, exclude_categories={"shaderpacks", "resourcepacks"}, suffix="server")
     if zip_path:
         bake_server_updater()
+    return zip_path
+
+
+def export_cf(version: str) -> Path | None:
+    """Build a CurseForge-format modpack zip for the given committed version."""
+    log_entry = get_log_entry(version)
+    if not log_entry:
+        print(f"[ERROR] Version {version} not found in log.")
+        return None
+
+    commit_id         = log_entry["commit"]
+    snapshot          = load_snapshot(commit_id)
+    cfg               = load_config()
+    settings          = cfg.get("settings", {})
+
+    modpack_name      = settings.get("modpack_name", "")
+    author            = settings.get("author", "")
+    logo_url          = settings.get("logo_url", "")
+    recommended_ram   = settings.get("recommended_ram", None)
+    modloader_id      = log_entry.get("modloader", "")
+    minecraft_version = log_entry.get("minecraft_version", "")
+
+    server_only_ids = get_filter_list("server_only")
+    client_snapshot = {
+        project_id: entry
+        for project_id, entry in snapshot.items()
+        if project_id not in server_only_ids
+    }
+    excluded_count = len(snapshot) - len(client_snapshot)
+
+    print(f"Building CurseForge export for v{version}...")
+    if not minecraft_version:
+        print("[WARN] No minecraft_version recorded for this version — manifest minecraft.version will be empty.")
+    if not modloader_id:
+        print("[WARN] No modloader recorded for this version — manifest will have no modLoaders entry.")
+    if excluded_count:
+        print(f"  Excluding {excluded_count} server-only mod(s).")
+
+    # Build manifest.json
+    modloaders: list[dict] = [{"id": modloader_id, "primary": True}] if modloader_id else []
+    minecraft_block: dict  = {"version": minecraft_version, "modLoaders": modloaders}
+    if recommended_ram is not None:
+        minecraft_block["recommendedRam"] = int(recommended_ram)
+
+    files = [
+        {"projectID": int(project_id), "fileID": int(entry["file_id"]), "required": True, "isLocked": False}
+        for project_id, entry in client_snapshot.items()
+    ]
+
+    manifest: dict = {
+        "minecraft":       minecraft_block,
+        "manifestType":    "minecraftModpack",
+        "manifestVersion": 1,
+        "name":            modpack_name,
+        "version":         version,
+        "author":          author,
+        "files":           files,
+        "overrides":       "overrides",
+    }
+    if logo_url:
+        manifest["image"] = logo_url
+
+    # Build modlist.html
+    modlist_rows = []
+    for project_id, entry in sorted(client_snapshot.items(), key=lambda item: item[1].get("name", item[0]).lower()):
+        name = entry.get("name") or f"Project {project_id}"
+        url  = f"https://www.curseforge.com/projects/{project_id}"
+        modlist_rows.append(f'  <li><a href="{url}">{name}</a></li>')
+    modlist_html = "<ul>\n" + "\n".join(modlist_rows) + "\n</ul>\n"
+
+    # Prepare bcc-common.toml content (update version/name in-place if stored, else create)
+    bcc_rel   = Path("config") / "bcc-common.toml"
+    bcc_src   = OVERRIDES_STORE / bcc_rel
+    bcc_v_re  = re.compile(r'^([ \t]*modpackVersion\s*=\s*)"[^"]*"', re.MULTILINE)
+    bcc_n_re  = re.compile(r'^([ \t]*modpackName\s*=\s*)"[^"]*"',    re.MULTILINE)
+    if bcc_src.exists():
+        bcc_text = bcc_src.read_text(encoding="utf-8")
+        bcc_text = bcc_v_re.sub(rf'\g<1>"{version}"',      bcc_text)
+        bcc_text = bcc_n_re.sub(rf'\g<1>"{modpack_name}"', bcc_text)
+        print(f"  bcc-common.toml version stamped → {version}")
+    else:
+        bcc_text = (
+            "#General settings\n[general]\n"
+            f'\tmodpackName = "{modpack_name}"\n'
+            f'\tmodpackVersion = "{version}"\n'
+            "\tuseMetadata = false\n"
+        )
+        print("  bcc-common.toml not found in overrides — creating default.")
+
+    # Write zip
+    RELEASES.mkdir(parents=True, exist_ok=True)
+    zip_path = RELEASES / f"{get_file_prefix()}-{version}-curseforge.zip"
+    try:
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("manifest.json", json.dumps(manifest, indent=2))
+            zf.writestr("modlist.html",  modlist_html)
+            override_file_count = 0
+            if OVERRIDES_STORE.is_dir():
+                for src_file in OVERRIDES_STORE.rglob("*"):
+                    if not src_file.is_file():
+                        continue
+                    rel = src_file.relative_to(OVERRIDES_STORE)
+                    if rel == bcc_rel:
+                        continue  # written separately below with updated version
+                    zf.write(src_file, f"overrides/{rel.as_posix()}")
+                    override_file_count += 1
+            zf.writestr(f"overrides/{bcc_rel.as_posix()}", bcc_text)
+    except Exception as exc:
+        print(f"[ERROR] Failed to write CurseForge zip: {exc}")
+        return None
+
+    print(f"  {len(files)} mods, {override_file_count} override file(s)")
+    print(f"[OK] Exported {zip_path}")
     return zip_path
 
 
@@ -1592,8 +1715,8 @@ def build_exe() -> None:
 
 def publish(version: str, message: str = "") -> None:
     """
-    Build a fresh client release zip, create a GitHub Release with the generated
-    changelog as release notes, and push updated versions.json to gh-pages.
+    Build a fresh client release zip and CurseForge export zip, create a GitHub Release
+    with the generated changelog as release notes, and push updated versions.json to gh-pages.
     An optional message is included at the top of the release notes.
     Aborts if the version has no client-visible changes (e.g. only server-only mods changed).
     """
@@ -1630,7 +1753,13 @@ def publish(version: str, message: str = "") -> None:
     baked_updater_path = _baked_client_updater_path()
     baked_exe_path     = baked_updater_path.with_suffix(".exe")
 
+    cf_zip_path = RELEASES / f"{get_file_prefix()}-{version}-curseforge.zip"
+
     release_assets = [str(zip_path)]
+    if cf_zip_path.exists():
+        release_assets.append(str(cf_zip_path))
+    else:
+        print(f"[WARN] {cf_zip_path.name} not found — not uploading CurseForge zip.")
     if baked_updater_path.exists():
         release_assets.append(str(baked_updater_path))
     else:
@@ -1795,8 +1924,8 @@ def purge_cache(all_files: bool = False) -> None:
     latest_commit_id = log[-1]["commit"]
     latest_snapshot  = load_snapshot(latest_commit_id)
     kept_pairs: set[str] = {
-        f"{project_id}_{file_id}"
-        for project_id, file_id in latest_snapshot.items()
+        f"{project_id}_{entry['file_id'] if isinstance(entry, dict) else entry}"
+        for project_id, entry in latest_snapshot.items()
     }
 
     removed_count = 0
@@ -1869,6 +1998,7 @@ Commands:
   build-pages                                       Build versions.json + snapshots/ locally to gh-pages/
   bake-updater  [--server]                          Bake client-updater.py to releases/; --server bakes server-updater.py instead (no exe)
   build-exe                                         Build releases/client-updater.exe from the baked client updater
+  export-cf     <version>                           Build a CurseForge-format modpack zip for the given version
   export-example                                    Write modpackctl.toml.example from the built-in defaults
 """.strip()
 
@@ -1991,6 +2121,13 @@ if __name__ == "__main__":
                 print(f"[ERROR] Bake failed — is {CLIENT_UPDATE_SCRIPT} present in the project root?")
                 sys.exit(1)
             print(f"[OK] Baked {_baked_client_updater_path()}")
+
+    elif cmd == "export-cf":
+        if len(sys.argv) < 3:
+            print("Usage: export-cf <version>")
+            sys.exit(1)
+        if not export_cf(sys.argv[2]):
+            sys.exit(1)
 
     elif cmd == "export-example":
         example_path = Path("modpackctl.toml.example")
