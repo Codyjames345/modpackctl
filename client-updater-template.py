@@ -1565,6 +1565,35 @@ class UpdaterApp(tk.Tk):
                     if self._konami_unlocked:
                         self._add_dance_button(button_row)
             self.after(0, add_finish_button)
+            # Update _current_builder so that returning from the dance screen
+            # shows a proper outcome screen rather than rebuilding the blank
+            # updating screen (which would show "Starting…" with an empty log).
+            _success, _message, _colour = success, message, colour
+            def _outcome_builder() -> tk.Frame:
+                self._update_button_row = None
+                self._update_progress_label = None
+                frame = tk.Frame(self, bg=DARK_BG)
+                self._header(frame)
+                body = tk.Frame(frame, bg=DARK_BG, padx=20, pady=40)
+                body.pack(fill="both", expand=True)
+                icon = "✓" if _success else "✗"
+                tk.Label(
+                    body, text=icon,
+                    font=("Consolas", 32, "bold"), bg=DARK_BG, fg=_colour,
+                ).pack(pady=(0, 8))
+                tk.Label(
+                    body, text=_message,
+                    font=FONT_BODY, bg=DARK_BG, fg=TEXT,
+                    wraplength=560, justify="center",
+                ).pack()
+                btn_row = tk.Frame(frame, bg=DARK_BG)
+                btn_row.pack(fill="x", padx=20, pady=12)
+                self._konami_button_row = btn_row
+                if self._konami_unlocked:
+                    self._add_dance_button(btn_row)
+                self._primary_button(btn_row, "Close", self._on_close).pack(side="right")
+                return frame
+            self._current_builder = _outcome_builder
         else:
             # Pre-update error (network failure, bad snapshot, etc.) — show outcome screen.
             def build() -> tk.Frame:
