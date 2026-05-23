@@ -14,9 +14,45 @@ A lightweight CLI for managing a CurseForge modpack across versions, with git-ba
 - `pip install requests`
 - [GitHub CLI](https://cli.github.com) (`gh`) — required only for `publish`
 
+## Global Setup (optional)
+
+To run `modpackctl` from any directory instead of `python /path/to/modpackctl.py`:
+
+**Windows (CMD or PowerShell):**
+
+Add the modpackctl directory to your `PATH`:
+
+1. Open Start → search **"Edit environment variables for your account"**
+2. Select `Path` under User variables → click **Edit** → **New**
+3. Paste the full path to the modpackctl directory (e.g. `C:\Tools\modpackctl`)
+4. Click OK and restart your terminal
+
+The included `modpackctl.cmd` is picked up automatically once the directory is in PATH.
+
+**Linux / macOS:**
+
+Make the shell script executable, then either add the directory to your `PATH` or symlink it:
+
+```bash
+chmod +x /path/to/modpackctl/modpackctl
+
+# Option A — add the directory to PATH (edit to match your shell's rc file)
+echo 'export PATH="/path/to/modpackctl:$PATH"' >> ~/.bashrc
+source ~/.bashrc
+
+# Option B — symlink into an existing bin directory
+ln -s /path/to/modpackctl/modpackctl ~/.local/bin/modpackctl
+```
+
+After either option you can run from any modpack directory:
+
+```
+modpackctl commit MyModpack.zip
+```
+
 ## Shell Autocomplete (optional)
 
-Tab-completion for subcommands and flags is available via [argcomplete](https://github.com/kislyuk/argcomplete):
+Tab-completion for subcommands and flags is available via [argcomplete](https://github.com/kislyuk/argcomplete). Complete [Global Setup](#global-setup-optional) first.
 
 1. Install:
    ```
@@ -26,26 +62,51 @@ Tab-completion for subcommands and flags is available via [argcomplete](https://
 2. Register for your shell:
 
    **PowerShell (Windows):**
+
+   Open your profile for editing:
    ```powershell
    New-Item -ItemType File -Path $PROFILE -Force
-   Register-Python-Argcomplete --shell powershell modpackctl.py | Out-File $PROFILE -Append
+   notepad $PROFILE
    ```
-   Then restart your terminal or run `. $PROFILE`. The first line creates the profile file if it doesn't exist yet and is safe to run even if it already does.
+
+   Paste the following block and save:
+   ```powershell
+   Register-ArgumentCompleter -Native -CommandName modpackctl -ScriptBlock {
+       param($wordToComplete, $commandAst, $cursorPosition)
+       $tmpFile = [System.IO.Path]::GetTempFileName()
+       $env:_ARGCOMPLETE = '1'
+       $env:COMP_LINE = $commandAst.ToString()
+       $env:COMP_POINT = "$cursorPosition"
+       $env:_ARGCOMPLETE_STDOUT_FILENAME = $tmpFile
+       modpackctl.cmd 2>$null
+       Remove-Item Env:\_ARGCOMPLETE, Env:\COMP_LINE, Env:\COMP_POINT, Env:\_ARGCOMPLETE_STDOUT_FILENAME -ErrorAction SilentlyContinue
+       if (Test-Path $tmpFile) {
+           (Get-Content $tmpFile -Raw) -split [char]11 | Where-Object { $_ } |
+               ForEach-Object { [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_) }
+           Remove-Item $tmpFile -Force
+       }
+   }
+   ```
+
+   Then reload your profile:
+   ```powershell
+   . $PROFILE
+   ```
 
    **Bash (Linux/macOS):**
    ```bash
-   echo 'eval "$(register-python-argcomplete modpackctl.py)"' >> ~/.bashrc
+   echo 'eval "$(register-python-argcomplete modpackctl)"' >> ~/.bashrc
    source ~/.bashrc
    ```
 
    **Zsh (Linux/macOS):**
    ```zsh
    echo 'autoload -U bashcompinit && bashcompinit' >> ~/.zshrc
-   echo 'eval "$(register-python-argcomplete modpackctl.py)"' >> ~/.zshrc
+   echo 'eval "$(register-python-argcomplete modpackctl)"' >> ~/.zshrc
    source ~/.zshrc
    ```
 
-After this, `python modpackctl.py <Tab>` completes subcommands and `python modpackctl.py commit <Tab>` completes flags.
+After this, `modpackctl <Tab>` completes subcommands and `modpackctl commit <Tab>` completes flags.
 
 ## Setup
 
