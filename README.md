@@ -83,15 +83,15 @@ python modpackctl.py publish 1.2.0 --message "Improved performance and fixed cra
 | `init <zip> [--force]` | Initialize from a CurseForge export zip. `--force` resets history but keeps the download cache. |
 | `commit <zip> [--major] [--message "..."]` | Record a new version from an updated export. Version is bumped automatically. `--major` forces a major bump. `--message` sets the release note shown to players in the updater changelog. |
 | `log` | List all committed versions with diff stats. |
-| `changelog <v1> [output.md] [--client\|--server]` | Generate a changelog for `v1` as an initial release. |
-| `changelog <v1> <v2> [output.md] [--client\|--server]` | Generate a changelog between two versions. `--client` excludes server-only mods; `--server` excludes client-only mods, shaderpacks, and resourcepacks. |
-| `release <version> [--client\|--server]` | Build a release zip. `--client` also bakes `releases/{file_prefix}-updater.py` and builds `releases/{file_prefix}-updater.exe` (if PyInstaller is available). Without a flag, includes all mods. |
+| `changelog <v1> [output.md] [--server]` | Generate a client changelog for `v1` as an initial release. `--server` excludes client-only mods, shaderpacks, and resourcepacks. |
+| `changelog <v1> <v2> [output.md] [--server]` | Generate a client changelog between two versions. `--server` excludes client-only mods, shaderpacks, and resourcepacks. |
+| `release <version> [--server]` | Build a client release zip, bake `releases/{file_prefix}-client-updater.py`, and build `releases/{file_prefix}-client-updater.exe` (if PyInstaller is available). `--server` builds a server release zip and bakes `releases/{file_prefix}-server-updater.py` instead (no exe). |
 | `publish <version> [--message "..."]` | Build a client release, create a GitHub Release with client-filtered changelog notes, and push `versions.json` and `snapshots/` to `gh-pages`. Uploads the zip, baked `.py`, and `.exe` (if built). `--message` overrides the message set at `commit` time. |
-| `update <version> [--client\|--server]` | Rebuild the `build/` folder for a version without zipping. |
+| `update <version> [--server]` | Rebuild the `build/` folder for a version without zipping. Defaults to client view; `--server` excludes client-only mods, shaderpacks, and resourcepacks. |
 | `purge [--all]` | Remove stale files from the download cache. Without `--all`, only removes mods not in the latest snapshot. |
 | `build-pages` | Write `versions.json` and `snapshots/` to a local `gh-pages/` folder. Useful for manually pushing to `gh-pages` if `publish` fails. |
-| `bake-updater` | Write a pre-configured `releases/{file_prefix}-updater.py` using credentials from `modpackctl.toml`, without building a full release. |
-| `build-exe` | Build `releases/{file_prefix}-updater.exe` from the baked updater script using PyInstaller. When `enable_secret` is true, also downloads and bundles the easter egg video and audio. Requires `pip install pyinstaller yt-dlp imageio-ffmpeg Pillow`. Also runs automatically as part of `release --client`. |
+| `bake-updater [--server]` | Bake `releases/{file_prefix}-client-updater.py` from the client updater template. `--server` bakes `releases/{file_prefix}-server-updater.py` instead (no exe). |
+| `build-exe` | Build `releases/{file_prefix}-client-updater.exe` from the baked client updater using PyInstaller. When `enable_secret` is true, also downloads and bundles the easter egg video and audio. Requires `pip install pyinstaller yt-dlp imageio-ffmpeg Pillow`. Also runs automatically as part of `release`. |
 | `export-example` | Write the built-in config template to `modpackctl.toml.example`. |
 
 ## Version Bumping
@@ -129,7 +129,7 @@ The flow:
 
 A **⚙ gear button** in the header opens the colour settings dialog, where players can customise all UI colours with a colour picker. Settings are saved to prefs and persist between runs.
 
-**Generating the updater:** Running `release --client` (or `publish`) reads your `modpackctl.toml` and substitutes placeholders in `client-updater-template.py`, writing the result to `releases/{file_prefix}-updater.py`. It then attempts to build `releases/{file_prefix}-updater.exe` via PyInstaller. Both files are pre-configured for your repo and require no setup on the player's end.
+**Generating the client updater:** Running `release` (or `publish`) reads your `modpackctl.toml` and substitutes placeholders in `client-updater-template.py`, writing the result to `releases/{file_prefix}-client-updater.py`. It then attempts to build `releases/{file_prefix}-client-updater.exe` via PyInstaller. Both files are pre-configured for your repo and require no setup on the player's end. Run `bake-updater` to produce just the script without building a release zip.
 
 Use these placeholders as plain string literals anywhere in `client-updater-template.py`:
 
@@ -143,13 +143,13 @@ Use these placeholders as plain string literals anywhere in `client-updater-temp
 | `"__SECRET_VIDEO_URL__"` | `settings.secret_video_url`, or the default Never Gonna Give You Up URL |
 | `"__ENABLE_RAINBOW__"` | `settings.enable_rainbow` as `True` or `False` (default: `False`) |
 
-Run `bake-updater` to produce `releases/{file_prefix}-updater.py` from the template without building a full release, or `build-exe` to compile the `.exe` from an already-baked script.
+Run `build-exe` to compile the `.exe` from an already-baked script.
 
 To enable exe building, install the build dependencies once: `pip install pyinstaller yt-dlp imageio-ffmpeg Pillow`
 
-**Distribution:** `publish` uploads up to three assets to the GitHub Release: the modpack zip, `{file_prefix}-updater.py`, and `{file_prefix}-updater.exe` (if the PyInstaller build succeeded). `publish` also pushes enriched snapshots (with mod names) to the `gh-pages` branch so the changelog displays real names like "Sodium" instead of project IDs.
+**Distribution:** `publish` uploads up to three assets to the GitHub Release: the modpack zip, `{file_prefix}-client-updater.py`, and `{file_prefix}-client-updater.exe` (if the PyInstaller build succeeded). `publish` also pushes enriched snapshots (with mod names) to the `gh-pages` branch so the changelog displays real names like "Sodium" instead of project IDs.
 
-- **New players** — download and extract the modpack zip, then download either `{file_prefix}-updater.exe` (no Python needed) or `{file_prefix}-updater.py` (requires Python 3.8+). Save it anywhere — Desktop, Downloads, etc.
+- **New players** — download and extract the modpack zip, then download either `{file_prefix}-client-updater.exe` (no Python needed) or `{file_prefix}-client-updater.py` (requires Python 3.8+). Save it anywhere — Desktop, Downloads, etc.
 - **Existing players** — re-run their saved updater; the prefs file remembers the modpack folder.
 
 **Player prefs:** the last-selected modpack folder is saved to `~/.modpack-updater/` (namespaced per modpack).
@@ -157,6 +157,37 @@ To enable exe building, install the build dependencies once: `pip install pyinst
 **Requirements for players (`.py` version):** Python 3.8+ and an internet connection. The updater itself uses only the standard library. When the easter egg is triggered for the first time, additional packages are installed automatically via pip in the background (`yt-dlp`, `Pillow`, `imageio`, `imageio-ffmpeg`) and the video is downloaded and cached in `~/.modpack-updater/`; players do not need to install anything manually.
 
 **Requirements for players (`.exe` version):** An internet connection is required to check for modpack updates — no Python installation needed. The easter egg video (when enabled) is bundled directly in the exe and works offline.
+
+## Server Updater
+
+`server-updater-template.py` is a CLI script for keeping the server's mods folder in sync with published releases. It excludes client-only mods (as listed in `versions.json`) and non-mod categories (shaderpacks, resourcepacks).
+
+```
+python server-updater.py [server_dir] [--version VERSION] [--fresh] [--yes] [--workers N]
+```
+
+| Argument | Description |
+|---|---|
+| `server_dir` | Path to the server directory. Defaults to the current directory. |
+| `--version VERSION` | Target version to install. Defaults to latest. |
+| `--fresh` | Wipe the mods folder and re-download everything clean. |
+| `--no-fresh` | Force an incremental update even if no version is detected. |
+| `--yes` | Skip the confirmation prompt (useful for automated deployments). |
+| `--workers N` | Number of parallel download threads (default: 4). |
+
+The script detects the installed version from `modpack_version.txt` in the server directory and defaults to a fresh install if that file is absent. On success it writes the new version back to `modpack_version.txt`.
+
+**Generating:** Run `bake-updater --server` to write `releases/{file_prefix}-server-updater.py` with your GitHub credentials baked in.
+
+Use these placeholders as plain string literals anywhere in `server-updater-template.py`:
+
+| Placeholder | Replaced with |
+|---|---|
+| `"__GITHUB_USER__"` | `github.user` from `modpackctl.toml` |
+| `"__GITHUB_REPO__"` | `github.repo` from `modpackctl.toml` |
+| `"__MODPACK_NAME__"` | `settings.modpack_name` from `modpackctl.toml` |
+
+**Requirements:** Python 3.8+ and an internet connection. Uses only the standard library.
 
 ## Repository Layout
 

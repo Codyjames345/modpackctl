@@ -156,6 +156,21 @@ def fetch_snapshot(commit_id: str) -> dict:
 
 
 # -------------------------
+# FILTERING
+# -------------------------
+
+def filter_for_client(snapshot: dict, server_only_ids: set[str]) -> dict:
+    """Return a copy of snapshot with server-only mods removed."""
+    if not server_only_ids:
+        return snapshot
+    return {
+        project_id: entry
+        for project_id, entry in snapshot.items()
+        if project_id not in server_only_ids
+    }
+
+
+# -------------------------
 # DIFF
 # -------------------------
 
@@ -1199,8 +1214,11 @@ class UpdaterApp(tk.Tk):
                 ))
                 return
 
-            self.new_snapshot = fetch_snapshot(target_commit)
-            self.old_snapshot = fetch_snapshot(old_commit) if old_commit else {}
+            server_only_ids: set[str] = set(
+                str(pid) for pid in self.versions_data.get("server_only_ids", [])
+            )
+            self.new_snapshot = filter_for_client(fetch_snapshot(target_commit), server_only_ids)
+            self.old_snapshot = filter_for_client(fetch_snapshot(old_commit), server_only_ids) if old_commit else {}
             self.update_plan  = build_update_plan(
                 self.old_snapshot, self.new_snapshot, self.modpack_dir,
             )

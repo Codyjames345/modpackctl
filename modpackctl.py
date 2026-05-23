@@ -1180,13 +1180,16 @@ def release_client(version: str) -> Path | None:
 
 
 def release_server(version: str) -> Path | None:
-    """Build a server release zip, excluding client-only mods, shaderpacks, and resourcepacks."""
+    """Build a server release zip, excluding client-only mods, shaderpacks, and resourcepacks, and bake server-updater-template.py."""
     excluded = get_filter_list("client_only")
     if not excluded:
         print("[WARN] No client_only list found in config — building full release.")
     else:
         print(f"[INFO] Excluding {len(excluded)} client-only mod(s).")
-    return release(version, exclude=excluded, exclude_categories={"shaderpacks", "resourcepacks"}, suffix="server")
+    zip_path = release(version, exclude=excluded, exclude_categories={"shaderpacks", "resourcepacks"}, suffix="server")
+    if zip_path:
+        bake_server_updater()
+    return zip_path
 
 
 # -------------------------
@@ -1219,9 +1222,12 @@ def _build_versions_json() -> dict:
             version_entry["modloader"] = entry["modloader"]
         versions.append(version_entry)
     client_only_ids = sorted(get_filter_list("client_only"))
+    server_only_ids = sorted(get_filter_list("server_only"))
     payload: dict = {"latest": log[-1]["version"] if log else None, "versions": versions}
     if client_only_ids:
         payload["client_only_ids"] = client_only_ids
+    if server_only_ids:
+        payload["server_only_ids"] = server_only_ids
     return payload
 
 
@@ -1560,8 +1566,8 @@ def _build_exe(source_py: Path) -> Path | None:
 def _clear_icon_cache() -> None:
     """Delete Windows icon cache DB files and restart Explorer so the new icon shows immediately."""
     import glob
-    answer = input("Clear Windows icon cache so the new icon appears immediately? (Explorer will restart) [y/n] ").strip().lower()
-    if answer != "y":
+    answer = input("Clear Windows icon cache so the new icon appears immediately? (Explorer will restart) [y/N] ").strip().lower()
+    if answer not in ("y", "yes"):
         print("[INFO] Skipped icon cache clear — the new icon may not appear.")
         return
     cache_dir = Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "Windows" / "Explorer"
@@ -1854,15 +1860,15 @@ Commands:
   init          <zip> [--force]                     Initialise repo from a CurseForge export zip
   commit        <zip> [--major] [--message "..."]   Record a new version; --message sets the release note shown to players
   log                                               List all committed versions
-  changelog     <v2> [out] [--client|--server] [--message "..."]        Write a changelog for v2 as an initial release
-  changelog     <v1> <v2> [out] [--client|--server] [--message "..."]   Write a changelog between two versions
-  release       <version> [--client|--server]       Build a release zip
+  changelog     <v2> [out] [--server] [--message "..."]        Write a client changelog for v2 as an initial release; --server for server view
+  changelog     <v1> <v2> [out] [--server] [--message "..."]   Write a client changelog between two versions; --server for server view
+  release       <version> [--server]                Build a client release zip (bakes updater + exe); --server builds server zip and bakes server-updater
   publish       <version> [--message "..."]         Build client release + push to GitHub (--message overrides the committed message)
-  update        <version> [--client|--server]       Rebuild the build folder for a version
+  update        <version> [--server]                Rebuild the client build folder for a version; --server for server build
   purge         [--all]                             Remove old files from the download cache
   build-pages                                       Build versions.json + snapshots/ locally to gh-pages/
-  bake-updater  [--client|--server]                 Write a pre-configured updater script to releases/ (default: client)
-  build-exe                                         Build releases/client-updater.exe from the baked updater
+  bake-updater  [--server]                          Bake client-updater.py to releases/; --server bakes server-updater.py instead (no exe)
+  build-exe                                         Build releases/client-updater.exe from the baked client updater
   export-example                                    Write modpackctl.toml.example from the built-in defaults
 """.strip()
 
@@ -1897,8 +1903,8 @@ if __name__ == "__main__":
 
     elif cmd == "changelog":
         if len(sys.argv) < 3:
-            print("Usage: changelog <v2> [output.md] [--client|--server] [--message \"...\"]")
-            print("   or: changelog <v1> <v2> [output.md] [--client|--server] [--message \"...\"]")
+            print("Usage: changelog <v2> [output.md] [--server] [--message \"...\"]")
+            print("   or: changelog <v1> <v2> [output.md] [--server] [--message \"...\"]")
             sys.exit(1)
 
         cl_message = ""
@@ -1909,15 +1915,15 @@ if __name__ == "__main__":
 
         cl_exclude: set[str] | None = None
         cl_exclude_categories: set[str] | None = None
-        if "--client" in sys.argv:
-            cl_exclude = get_filter_list("server_only")
-        elif "--server" in sys.argv:
+        if "--server" in sys.argv:
             cl_exclude = get_filter_list("client_only")
             cl_exclude_categories = {"shaderpacks", "resourcepacks"}
+        else:
+            cl_exclude = get_filter_list("server_only")
 
         clean_args = [
             arg for arg in sys.argv[3:]
-            if arg not in ("--message", "--client", "--server") and arg != cl_message
+            if arg not in ("--message", "--server") and arg != cl_message
         ]
 
         if not clean_args:
@@ -1936,14 +1942,12 @@ if __name__ == "__main__":
 
     elif cmd == "release":
         if len(sys.argv) < 3:
-            print("Usage: release <version> [--client|--server]")
+            print("Usage: release <version> [--server]")
             sys.exit(1)
-        if "--client" in sys.argv:
-            release_client(sys.argv[2])
-        elif "--server" in sys.argv:
+        if "--server" in sys.argv:
             release_server(sys.argv[2])
         else:
-            release(sys.argv[2])
+            release_client(sys.argv[2])
 
     elif cmd == "publish":
         if len(sys.argv) < 3:
@@ -1958,16 +1962,14 @@ if __name__ == "__main__":
 
     elif cmd == "update":
         if len(sys.argv) < 3:
-            print("Usage: update <version> [--client|--server]")
+            print("Usage: update <version> [--server]")
             sys.exit(1)
-        if "--client" in sys.argv:
-            excluded = get_filter_list("server_only")
-            update(sys.argv[2], exclude=excluded, suffix="client")
-        elif "--server" in sys.argv:
+        if "--server" in sys.argv:
             excluded = get_filter_list("client_only")
             update(sys.argv[2], exclude=excluded, exclude_categories={"shaderpacks", "resourcepacks"}, suffix="server")
         else:
-            update(sys.argv[2])
+            excluded = get_filter_list("server_only")
+            update(sys.argv[2], exclude=excluded, suffix="client")
 
     elif cmd == "purge":
         purge_cache("--all" in sys.argv)
