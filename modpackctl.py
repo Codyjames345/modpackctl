@@ -1956,6 +1956,57 @@ def purge_cache(all_files: bool = False) -> None:
 # -------------------------
 
 
+def remove_commit(version: str) -> None:
+    """
+    Permanently remove a committed version from the log and delete its snapshot.
+    Prompts for confirmation — this operation cannot be undone.
+    """
+    log = load_log()
+    if not log:
+        print("[ERROR] No committed versions found.")
+        return
+
+    target_index = None
+    for index, entry in enumerate(log):
+        if str(entry["version"]) == str(version):
+            target_index = index
+            break
+
+    if target_index is None:
+        print(f"[ERROR] Version '{version}' not found in log.")
+        return
+
+    target_entry = log[target_index]
+    commit_id    = target_entry["commit"]
+    is_latest    = target_index == len(log) - 1
+    is_only      = len(log) == 1
+
+    print(f"[WARN] You are about to permanently remove version {version} ({commit_id}) from history.")
+    print("       This deletes the log entry and snapshot file. It cannot be undone.")
+    if is_only:
+        print("       This is the only committed version — the repository will be left empty.")
+    elif not is_latest:
+        prev_version = log[target_index - 1]["version"] if target_index > 0 else None
+        next_version = log[target_index + 1]["version"]
+        context      = f"{prev_version} → {next_version}" if prev_version else f"initial → {next_version}"
+        print(f"       Removing an intermediate commit will leave a gap in version history ({context}).")
+    print()
+
+    answer = input(f"Type '{version}' to confirm: ").strip()
+    if answer != str(version):
+        print("[INFO] Aborted.")
+        return
+
+    log.pop(target_index)
+    save_json(LOG_FILE, log)
+
+    snapshot_path = SNAPSHOTS / f"{commit_id}.json"
+    if snapshot_path.exists():
+        snapshot_path.unlink()
+
+    print(f"[OK] Version {version} removed from history.")
+
+
 def show_log() -> None:
     """Print all committed versions in reverse chronological order with diff statistics."""
     log = load_log()
@@ -2007,6 +2058,15 @@ if __name__ == "__main__":
 
     # log
     subparsers.add_parser("log", help="List all committed versions with diff stats")
+
+    # remove-commit
+    parser_remove = subparsers.add_parser("remove-commit", help="Permanently remove a committed version from history (irreversible)")
+    parser_remove.add_argument("version", help="Version to remove")
+
+    # set-message
+    parser_set_message = subparsers.add_parser("set-message", help="Set or clear the release note for any committed version")
+    parser_set_message.add_argument("version", help="Version to update")
+    parser_set_message.add_argument("message", nargs="?", default="", help="New release note (omit to clear the existing message)")
 
     # changelog
     parser_changelog = subparsers.add_parser("changelog", help="Generate a Markdown changelog between two versions")
@@ -2062,6 +2122,19 @@ if __name__ == "__main__":
 
     elif args.command == "log":
         show_log()
+
+    elif args.command == "remove-commit":
+        remove_commit(args.version)
+
+    elif args.command == "set-message":
+        if not get_log_entry(args.version):
+            print(f"[ERROR] Version '{args.version}' not found in log.")
+            sys.exit(1)
+        set_version_message(args.version, args.message)
+        if args.message:
+            print(f"[OK] Message set for v{args.version}.")
+        else:
+            print(f"[OK] Message cleared for v{args.version}.")
 
     elif args.command == "changelog":
         if args.server:
