@@ -8,6 +8,10 @@ Requirements: Python 3.8+
 from __future__ import annotations
 
 import argparse
+try:
+    import argcomplete
+except ModuleNotFoundError:
+    argcomplete = None  # type: ignore[assignment]
 import json
 import os
 import re
@@ -348,6 +352,8 @@ def main() -> None:
         metavar="N",
         help="Number of parallel download workers (default: 4).",
     )
+    if argcomplete:
+        argcomplete.autocomplete(parser)
     args = parser.parse_args()
 
     prefs = load_prefs()

@@ -1,4 +1,8 @@
 import argparse
+try:
+    import argcomplete
+except ModuleNotFoundError:
+    argcomplete = None  # type: ignore[assignment]
 import json
 import re
 import zipfile
@@ -2112,6 +2116,8 @@ if __name__ == "__main__":
     # export-example
     subparsers.add_parser("export-example", help="Write modpackctl.toml.example from the built-in defaults")
 
+    if argcomplete:
+        argcomplete.autocomplete(parser)
     args = parser.parse_args()
 
     if args.command == "init":

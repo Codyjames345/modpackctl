@@ -14,6 +14,38 @@ A lightweight CLI for managing a CurseForge modpack across versions, with git-ba
 - `pip install requests`
 - [GitHub CLI](https://cli.github.com) (`gh`) — required only for `publish`
 
+## Shell Autocomplete (optional)
+
+Tab-completion for subcommands and flags is available via [argcomplete](https://github.com/kislyuk/argcomplete):
+
+1. Install:
+   ```
+   pip install argcomplete
+   ```
+
+2. Register for your shell:
+
+   **PowerShell (Windows):**
+   ```powershell
+   Register-Python-Argcomplete --shell powershell modpackctl.py | Out-File $PROFILE -Append
+   ```
+   Then restart your terminal or run `. $PROFILE`.
+
+   **Bash (Linux/macOS):**
+   ```bash
+   echo 'eval "$(register-python-argcomplete modpackctl.py)"' >> ~/.bashrc
+   source ~/.bashrc
+   ```
+
+   **Zsh (Linux/macOS):**
+   ```zsh
+   echo 'autoload -U bashcompinit && bashcompinit' >> ~/.zshrc
+   echo 'eval "$(register-python-argcomplete modpackctl.py)"' >> ~/.zshrc
+   source ~/.zshrc
+   ```
+
+After this, `python modpackctl.py <Tab>` completes subcommands and `python modpackctl.py commit <Tab>` completes flags.
+
 ## Setup
 
 1. Copy `modpackctl.toml.example` to `modpackctl.toml` (or one will be created automatically) and fill in your GitHub details:
