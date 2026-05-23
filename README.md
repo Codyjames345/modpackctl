@@ -106,7 +106,7 @@ Tab-completion for subcommands and flags is available via [argcomplete](https://
    source ~/.zshrc
    ```
 
-After this, `modpackctl <Tab>` completes subcommands and `modpackctl commit <Tab>` completes flags.
+After this, `modpackctl <Tab>` completes subcommands and `modpackctl <command> <Tab>` completes flags for that subcommand.
 
 ## Setup
 
