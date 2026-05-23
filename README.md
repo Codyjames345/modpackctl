@@ -76,12 +76,13 @@ python modpackctl.py publish 1.2.0 --message "Improved performance and fixed cra
 | `log` | List all committed versions with diff stats. |
 | `changelog <v1> [output.md] [--client\|--server]` | Generate a changelog for `v1` as an initial release. |
 | `changelog <v1> <v2> [output.md] [--client\|--server]` | Generate a changelog between two versions. `--client` excludes server-only mods; `--server` excludes client-only mods, shaderpacks, and resourcepacks. |
-| `release <version> [--client\|--server]` | Build a release zip. `--client` also produces a baked `releases/client-updater.py`. Without a flag, includes all mods. |
-| `publish <version> [--message "..."]` | Build a client release, create a GitHub Release with client-filtered changelog notes, and push `versions.json` and `snapshots/` to `gh-pages`. `--message` overrides the message set at `commit` time. |
+| `release <version> [--client\|--server]` | Build a release zip. `--client` also bakes `releases/client-updater.py` and builds `releases/client-updater.exe` (if PyInstaller is available). Without a flag, includes all mods. |
+| `publish <version> [--message "..."]` | Build a client release, create a GitHub Release with client-filtered changelog notes, and push `versions.json` and `snapshots/` to `gh-pages`. Uploads the zip, baked `.py`, and `.exe` (if built). `--message` overrides the message set at `commit` time. |
 | `update <version> [--client\|--server]` | Rebuild the `build/` folder for a version without zipping. |
 | `purge [--all]` | Remove stale files from the download cache. Without `--all`, only removes mods not in the latest snapshot. |
 | `build-pages` | Write `versions.json` and `snapshots/` to a local `gh-pages/` folder. Useful for manually pushing to `gh-pages` if `publish` fails. |
 | `bake-updater` | Write a pre-configured `releases/client-updater.py` using credentials from `modpackctl.toml`, without building a full release. |
+| `build-exe` | Build `releases/client-updater.exe` from the baked `releases/client-updater.py` using PyInstaller. Requires `pip install pyinstaller yt-dlp moviepy Pillow imageio-ffmpeg`. Also runs automatically as part of `release --client`. |
 | `export-example` | Write the built-in config template to `modpackctl.toml.example`. |
 
 ## Version Bumping
@@ -119,9 +120,9 @@ The flow:
 
 A **⚙ gear button** in the header opens the colour settings dialog, where players can customise all UI colours with a colour picker. Settings are saved to prefs and persist between runs.
 
-**Generating client-updater.py:** Running `release --client` (or `publish`) reads your `modpackctl.toml` and substitutes placeholders in `client-updater.py`, writing the result to `releases/client-updater.py`. This is the file players download — it is pre-configured for your repo and requires no setup on their end.
+**Generating the updater:** Running `release --client` (or `publish`) reads your `modpackctl.toml` and substitutes placeholders in `client-updater-template.py`, writing the result to `releases/client-updater.py`. It then attempts to build `releases/client-updater.exe` via PyInstaller. Both files are pre-configured for your repo and require no setup on the player's end.
 
-Use these placeholders as plain string literals anywhere in `client-updater.py`:
+Use these placeholders as plain string literals anywhere in `client-updater-template.py`:
 
 | Placeholder | Replaced with |
 |---|---|
@@ -130,16 +131,20 @@ Use these placeholders as plain string literals anywhere in `client-updater.py`:
 | `"__MODPACK_NAME__"` | `settings.modpack_name` from `modpackctl.toml` |
 | `"__LOGO_URL__"` | `settings.logo_url`, or an empty string if not set |
 
-Run `bake-updater` to bake without building a full release.
+Run `bake-updater` to produce `releases/client-updater.py` from the template without building a full release, or `build-exe` to compile the `.exe` from an already-baked `releases/client-updater.py`.
 
-**Distribution:** `publish` uploads two assets to the GitHub Release: the modpack zip and the pre-configured `releases/client-updater.py`. `publish` also pushes enriched snapshots (with mod names) to the `gh-pages` branch so the changelog displays real names like "Sodium" instead of project IDs.
+To enable exe building, install the build dependencies once: `pip install pyinstaller yt-dlp moviepy Pillow imageio-ffmpeg`
 
-- **New players** — download and extract the modpack zip, then download `client-updater.py` (save it anywhere).
-- **Existing players** — re-run their saved `client-updater.py`; the prefs file remembers the modpack folder.
+**Distribution:** `publish` uploads up to three assets to the GitHub Release: the modpack zip, `client-updater.py`, and `client-updater.exe` (if the PyInstaller build succeeded). `publish` also pushes enriched snapshots (with mod names) to the `gh-pages` branch so the changelog displays real names like "Sodium" instead of project IDs.
+
+- **New players** — download and extract the modpack zip, then download either `client-updater.exe` (no Python needed) or `client-updater.py` (requires Python 3.8+). Save it anywhere — Desktop, Downloads, etc.
+- **Existing players** — re-run their saved updater; the prefs file remembers the modpack folder.
 
 **Player prefs:** the last-selected modpack folder is saved to `~/.modpack-updater/` (namespaced per modpack).
 
-**Requirements for players:** Python 3.8+ and an internet connection. The updater itself uses only the standard library. A hidden easter egg installs additional packages automatically via pip in the background the first time the updater is run (`yt-dlp`, `moviepy`, `Pillow`, `imageio-ffmpeg`); players do not need to install anything manually.
+**Requirements for players (`.py` version):** Python 3.8+ and an internet connection. The updater itself uses only the standard library. A hidden easter egg installs additional packages automatically via pip in the background the first time the updater is run (`yt-dlp`, `moviepy`, `Pillow`, `imageio-ffmpeg`); players do not need to install anything manually.
+
+**Requirements for players (`.exe` version):** An internet connection only — no Python installation needed.
 
 ## Repository Layout
 
@@ -151,8 +156,9 @@ Run `bake-updater` to bake without building a full release.
   snapshots/        — per-commit mod state (used for diffs and updates)
   overrides/        — stored CurseForge overrides (configs, resource files)
   dl_cache/         — persistent jar store (avoids re-downloading on rebuild)
+.pyinstaller/       — PyInstaller build cache (not committed)
 build/              — current working build (mods/, shaderpacks/, resourcepacks/)
-releases/           — output zips from release / publish
+releases/           — output zips, client-updater.py, and client-updater.exe
 modpackctl.toml     — your config (not committed)
 ```
 

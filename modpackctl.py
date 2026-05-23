@@ -38,7 +38,8 @@ CONFIG_FILE     = Path("modpackctl.toml")
 
 BUILD         = Path("build")
 RELEASES      = Path("releases")
-UPDATE_SCRIPT = Path("client-updater.py")
+UPDATE_SCRIPT  = Path("client-updater-template.py")   # source template (never modified at runtime)
+BAKED_UPDATER  = RELEASES / "client-updater.py"        # baked output written during release/bake
 
 CF_URL  = "https://api.cfwidget.com/{}"
 HEADERS = {"User-Agent": "modpackctl/1.0"}
@@ -1138,7 +1139,7 @@ def release(
 
 
 def release_client(version: str) -> Path | None:
-    """Build a client release zip, excluding any mods in the server_only list, and bake client-updater.py."""
+    """Build a client release zip, excluding any mods in the server_only list, and bake client-updater-template.py."""
     excluded = get_filter_list("server_only")
     if not excluded:
         print("[WARN] No server_only list found in config — building full release.")
@@ -1147,7 +1148,14 @@ def release_client(version: str) -> Path | None:
     zip_path = release(version, exclude=excluded, suffix="client")
     if zip_path:
         if bake_updater():
-            print(f"[OK] Baked client-updater.py → {RELEASES / UPDATE_SCRIPT.name}")
+            print(f"[OK] Baked {UPDATE_SCRIPT.name} → {BAKED_UPDATER}")
+            print("Building client-updater.exe...")
+            exe_path = _build_exe(BAKED_UPDATER)
+            if exe_path:
+                print(f"[OK] client-updater.exe built.")
+            else:
+                print("[WARN] PyInstaller build failed — exe not included in release.")
+                print("       Install build deps: pip install pyinstaller yt-dlp moviepy Pillow imageio-ffmpeg")
     return zip_path
 
 
@@ -1373,6 +1381,54 @@ def _has_client_changes(version: str) -> bool:
     return bool(changes["added"] or changes["removed"] or changes["updated"])
 
 
+def _build_exe(source_py: Path) -> Path | None:
+    """
+    Build a standalone Windows exe from source_py using PyInstaller.
+    Returns the exe path on success, or None if PyInstaller is unavailable or fails.
+    """
+    exe_path = source_py.parent / (source_py.stem + ".exe")
+    try:
+        subprocess.run(
+            [
+                sys.executable, "-m", "PyInstaller",
+                "--onefile", "--windowed",
+                "--name", source_py.stem,
+                "--collect-all", "yt_dlp",
+                "--collect-all", "moviepy",
+                "--collect-all", "imageio",
+                "--collect-all", "imageio_ffmpeg",
+                "--collect-all", "PIL",
+                "--distpath", str(source_py.parent),
+                "--workpath", str(Path(".pyinstaller") / "work"),
+                "--specpath", str(Path(".pyinstaller")),
+                str(source_py),
+            ],
+            check=True,
+        )
+    except FileNotFoundError:
+        return None
+    except subprocess.CalledProcessError:
+        return None
+    return exe_path if exe_path.exists() else None
+
+
+def build_exe() -> None:
+    """Build releases/client-updater.exe from the baked releases/client-updater.py."""
+    baked_updater_path = BAKED_UPDATER
+    if not baked_updater_path.exists():
+        print("[ERROR] releases/client-updater.py not found.")
+        print("        Run 'python modpackctl.py bake-updater' first.")
+        sys.exit(1)
+    print("Building client-updater.exe...")
+    exe_path = _build_exe(baked_updater_path)
+    if exe_path:
+        print(f"[OK] Built {exe_path}")
+    else:
+        print("[ERROR] PyInstaller build failed.")
+        print("        Install build deps: pip install pyinstaller yt-dlp moviepy Pillow imageio-ffmpeg")
+        sys.exit(1)
+
+
 def publish(version: str, message: str = "") -> None:
     """
     Build a fresh client release zip, create a GitHub Release with the generated
@@ -1411,12 +1467,16 @@ def publish(version: str, message: str = "") -> None:
     notes_path = _get_notes_file_for_release(version, message=message, side="client")
     tag        = f"v{version}"
 
-    baked_updater_path = RELEASES / "client-updater.py"
+    baked_updater_path = BAKED_UPDATER
+    baked_exe_path     = RELEASES / "client-updater.exe"
+
     release_assets = [str(zip_path)]
     if baked_updater_path.exists():
         release_assets.append(str(baked_updater_path))
     else:
         print("[WARN] releases/client-updater.py not found — not uploading updater.")
+    if baked_exe_path.exists():
+        release_assets.append(str(baked_exe_path))
 
     print(f"Creating GitHub Release {tag}...")
     release_ok = False
@@ -1481,10 +1541,10 @@ def build_pages() -> None:
 
 def bake_updater() -> bool:
     """
-    Substitute config placeholders in client-updater.py and write the result to
-    releases/client-updater.py. Returns False if client-updater.py is not present.
+    Substitute config placeholders in client-updater-template.py and write the result to
+    releases/client-updater.py. Returns False if client-updater-template.py is not present.
 
-    Supported placeholders (written as bare Python string literals in client-updater.py):
+    Supported placeholders (written as bare Python string literals in client-updater-template.py):
       __GITHUB_USER__   — GitHub username from modpackctl.toml
       __GITHUB_REPO__   — GitHub repo name from modpackctl.toml
       __MODPACK_NAME__  — settings.modpack_name from modpackctl.toml
@@ -1503,7 +1563,7 @@ def bake_updater() -> bool:
     content = content.replace('"__GITHUB_REPO__"',  f'"{repo}"')
     content = content.replace('"__MODPACK_NAME__"', f'"{modpack_name}"')
     content = content.replace('"__LOGO_URL__"',     f'"{logo_url}"')
-    dest_path = RELEASES / UPDATE_SCRIPT.name
+    dest_path = BAKED_UPDATER
     dest_path.parent.mkdir(parents=True, exist_ok=True)
     dest_path.write_text(content, encoding="utf-8")
     return True
@@ -1613,6 +1673,7 @@ Commands:
   purge         [--all]                             Remove old files from the download cache
   build-pages                                       Build versions.json + snapshots/ locally to gh-pages/
   bake-updater                                      Write a pre-configured client-updater.py to releases/
+  build-exe                                         Build releases/client-updater.exe from the baked updater
   export-example                                    Write modpackctl.toml.example from the built-in defaults
 """.strip()
 
@@ -1722,6 +1783,9 @@ if __name__ == "__main__":
     elif cmd == "purge":
         purge_cache("--all" in sys.argv)
 
+    elif cmd == "build-exe":
+        build_exe()
+
     elif cmd == "build-pages":
         build_pages()
 
@@ -1729,7 +1793,7 @@ if __name__ == "__main__":
         if not bake_updater():
             print(f"[ERROR] Bake failed — is {UPDATE_SCRIPT} present in the project root?")
             sys.exit(1)
-        print(f"[OK] Baked {RELEASES / UPDATE_SCRIPT.name}")
+        print(f"[OK] Baked {BAKED_UPDATER}")
 
     elif cmd == "export-example":
         example_path = Path("modpackctl.toml.example")
