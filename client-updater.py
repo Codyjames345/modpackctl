@@ -9,19 +9,36 @@ Requirements: Python 3.8+
 from __future__ import annotations
 
 import base64
+import colorsys
+import importlib
 import json
 import os
+import queue
+import random
 import shutil
+import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 import urllib.error
 import urllib.request
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from tkinter import colorchooser, filedialog, messagebox
+from tkinter import colorchooser, filedialog, messagebox, ttk
 from urllib.parse import unquote, urlparse
+
+try:
+    import yt_dlp as _yt_dlp  # type: ignore[import-untyped]
+except ImportError:
+    _yt_dlp = None  # type: ignore[assignment]
+
+try:
+    import moviepy  # type: ignore[import-untyped]  # noqa: F401
+    _HAS_MOVIEPY = True
+except ImportError:
+    _HAS_MOVIEPY = False
 
 # -------------------------
 # CONFIG  (baked in at release time by modpackctl)
@@ -285,6 +302,7 @@ _COLOUR_DEFAULTS: dict[str, str] = {
     "RED":       "#e05050",
     "GREEN":     "#00d4aa",
     "YELLOW":    "#f0c060",
+    "KONAMI":    "#ff69b4",
 }
 
 _COLOUR_LABELS: dict[str, str] = {
@@ -298,6 +316,7 @@ _COLOUR_LABELS: dict[str, str] = {
     "RED":       "Changelog: removed",
     "GREEN":     "Changelog: added",
     "YELLOW":    "Changelog: updated",
+    "KONAMI":    "Secret Button",
 }
 
 DARK_BG   = _COLOUR_DEFAULTS["DARK_BG"]
@@ -310,6 +329,15 @@ TEXT_DIM  = _COLOUR_DEFAULTS["TEXT_DIM"]
 RED       = _COLOUR_DEFAULTS["RED"]
 GREEN     = _COLOUR_DEFAULTS["GREEN"]
 YELLOW    = _COLOUR_DEFAULTS["YELLOW"]
+KONAMI    = _COLOUR_DEFAULTS["KONAMI"]
+
+_KONAMI_SEQUENCE  = [
+    "Up", "Up", "Down", "Down", "Left", "Right", "Left", "Right", "b", "a", "Return",
+]
+_DANCE_VIDEO_URL  = "https://www.youtube.com/watch?v=6-8E4Nirh9s&list=RD6-8E4Nirh9s"
+_DANCE_CACHE_FILE = Path.home() / ".modpack-updater" / "caramelldansen.mp4"
+_DANCE_AUDIO_FILE = Path.home() / ".modpack-updater" / "caramelldansen_audio.wav"
+_DANCE_AUDIO_LOCK = threading.Lock()
 
 FONT_TITLE        = ("Consolas", 13, "bold")
 FONT_LARGE        = ("Consolas", 12)
@@ -320,7 +348,7 @@ FONT_MONO_ITALIC  = ("Consolas", 9, "italic")
 
 
 def _apply_colour_overrides(overrides: dict) -> None:
-    global DARK_BG, PANEL_BG, ACCENT, ACCENT_HV, ACCENT2, TEXT, TEXT_DIM, RED, GREEN, YELLOW
+    global DARK_BG, PANEL_BG, ACCENT, ACCENT_HV, ACCENT2, TEXT, TEXT_DIM, RED, GREEN, YELLOW, KONAMI
     DARK_BG   = overrides.get("DARK_BG",   _COLOUR_DEFAULTS["DARK_BG"])
     PANEL_BG  = overrides.get("PANEL_BG",  _COLOUR_DEFAULTS["PANEL_BG"])
     ACCENT    = overrides.get("ACCENT",    _COLOUR_DEFAULTS["ACCENT"])
@@ -331,6 +359,57 @@ def _apply_colour_overrides(overrides: dict) -> None:
     RED       = overrides.get("RED",       _COLOUR_DEFAULTS["RED"])
     GREEN     = overrides.get("GREEN",     _COLOUR_DEFAULTS["GREEN"])
     YELLOW    = overrides.get("YELLOW",    _COLOUR_DEFAULTS["YELLOW"])
+    KONAMI    = overrides.get("KONAMI",    _COLOUR_DEFAULTS["KONAMI"])
+
+
+# -------------------------
+# DANCE ASSET PREFETCH
+# -------------------------
+
+def _prefetch_dance_assets() -> None:
+    global _yt_dlp, _HAS_MOVIEPY
+    try:
+        to_install = []
+        if _yt_dlp is None:
+            to_install.append("yt-dlp")
+        if not _HAS_MOVIEPY:
+            to_install.extend(["moviepy", "Pillow", "imageio-ffmpeg"])
+        if to_install:
+            result = subprocess.run(
+                [sys.executable, "-m", "pip", "install", *to_install],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            )
+            if result.returncode == 0:
+                if _yt_dlp is None:
+                    _yt_dlp = importlib.import_module("yt_dlp")  # type: ignore[assignment]
+                _HAS_MOVIEPY = True
+
+        if _yt_dlp is None:
+            return
+
+        _DANCE_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        if not _DANCE_CACHE_FILE.exists():
+            ydl_opts = {
+                "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/mp4/best",
+                "outtmpl": str(_DANCE_CACHE_FILE),
+                "merge_output_format": "mp4",
+                "quiet": True,
+                "no_warnings": True,
+            }
+            with _yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore[union-attr]
+                ydl.download([_DANCE_VIDEO_URL])
+
+        if not (_DANCE_CACHE_FILE.exists() and _HAS_MOVIEPY):
+            return
+
+        with _DANCE_AUDIO_LOCK:
+            if not _DANCE_AUDIO_FILE.exists():
+                moviepy_mod = importlib.import_module("moviepy")
+                clip = moviepy_mod.VideoFileClip(str(_DANCE_CACHE_FILE))
+                clip.audio.write_audiofile(str(_DANCE_AUDIO_FILE), logger=None)
+                clip.close()
+    except Exception:
+        pass
 
 
 # -------------------------
@@ -384,6 +463,16 @@ class UpdaterApp(tk.Tk):
         self._progress_var  = tk.StringVar()
         self._log_text: tk.Text | None              = None
 
+        self._konami_progress: int                  = 0
+        self._konami_unlocked: bool                 = False
+        self._konami_button_row: tk.Frame | None    = None
+        self._dance_visited: bool                   = False
+        self._border_rainbow_started: bool          = False
+        self._dance_audio_start: float | None       = None
+        threading.Thread(target=_prefetch_dance_assets, daemon=True).start()
+
+        self.bind_all("<Key>", self._on_key_for_konami)
+
         if LOGO_URL:
             threading.Thread(target=self._prefetch_logo, daemon=True).start()
 
@@ -433,13 +522,29 @@ class UpdaterApp(tk.Tk):
 
     # ---- frame management ----
 
-    def _swap_frame(self, builder) -> None:
+    def _swap_frame(self, builder, *, no_border: bool = False) -> None:
         if self._current_frame is not None:
             self._current_frame.destroy()
         self._current_builder = builder
+        self._konami_button_row = None
         new_frame = builder()
-        new_frame.pack(fill="both", expand=True)
+        if self._dance_visited and not no_border:
+            if not self._border_rainbow_started:
+                self._start_border_rainbow()
+            new_frame.pack(fill="both", expand=True, padx=8, pady=8)
+        else:
+            new_frame.pack(fill="both", expand=True)
         self._current_frame = new_frame
+
+    def _start_border_rainbow(self) -> None:
+        self._border_rainbow_started = True
+
+        def step() -> None:
+            r, g, b = colorsys.hsv_to_rgb(random.random(), 1.0, 1.0)
+            self.configure(bg=f"#{int(r * 255):02x}{int(g * 255):02x}{int(b * 255):02x}")
+            self.after(150, step)
+
+        step()
 
     def _header(self, parent: tk.Misc, subtitle: str = "") -> tk.Frame:
         header = tk.Frame(parent, bg=ACCENT2, padx=20, pady=14)
@@ -806,6 +911,9 @@ class UpdaterApp(tk.Tk):
             ).pack()
             button_row = tk.Frame(frame, bg=DARK_BG)
             button_row.pack(fill="x", padx=20, pady=12)
+            self._konami_button_row = button_row
+            if self._konami_unlocked:
+                self._add_dance_button(button_row)
             self._secondary_button(
                 button_row, "Choose version…", self._show_version_options,
             ).pack(side="right", padx=(10, 0))
@@ -1240,6 +1348,10 @@ class UpdaterApp(tk.Tk):
                 self.after(0, lambda: progress_label.config(fg=colour))
             def add_finish_button() -> None:
                 self._primary_button(button_row, "Finish", self._on_close).pack(side="right")
+                if success:
+                    self._konami_button_row = button_row
+                    if self._konami_unlocked:
+                        self._add_dance_button(button_row)
             self.after(0, add_finish_button)
         else:
             # Pre-update error (network failure, bad snapshot, etc.) — show outcome screen.
@@ -1263,6 +1375,306 @@ class UpdaterApp(tk.Tk):
                 self._primary_button(button_row, "Close", self._on_close).pack(side="right")
                 return frame
             self._swap_frame(build)
+
+
+    # ---- easter egg: konami code ----
+
+    def _on_key_for_konami(self, event: tk.Event) -> None:
+        expected = _KONAMI_SEQUENCE[self._konami_progress]
+        if event.keysym == expected:
+            self._konami_progress += 1
+            if self._konami_progress == len(_KONAMI_SEQUENCE):
+                self._konami_progress = 0
+                self._on_konami_complete()
+        else:
+            self._konami_progress = 1 if event.keysym == _KONAMI_SEQUENCE[0] else 0
+
+    def _on_konami_complete(self) -> None:
+        self._konami_unlocked = True
+        if self._konami_button_row is not None:
+            try:
+                self._add_dance_button(self._konami_button_row)
+            except tk.TclError:
+                pass
+
+    def _add_dance_button(self, button_row: tk.Frame) -> None:
+        tk.Button(
+            button_row, text="Dance? 💃",
+            font=FONT_BODY, bg=KONAMI, fg="white",
+            activebackground=KONAMI, activeforeground="white",
+            relief="flat", bd=0, padx=14, pady=8, cursor="hand2",
+            command=self._show_dance,
+        ).pack(side="left")
+
+    def _show_dance(self) -> None:
+        self._dance_visited = True
+        previous_builder = self._current_builder
+
+        def go_back() -> None:
+            if previous_builder is not None:
+                self._swap_frame(previous_builder)
+            else:
+                self._on_close()
+
+        def add_header_with_question(frame: tk.Frame) -> None:
+            self._header(frame)
+            if self._header_title_label is not None:
+                self._header_title_label.configure(
+                    text=self._header_title_label.cget("text") + "?"
+                )
+
+        def add_back_button(frame: tk.Frame) -> None:
+            row = tk.Frame(frame, bg=DARK_BG)
+            row.pack(fill="x", padx=20, pady=12, side="bottom")
+            self._secondary_button(row, "← Back", go_back).pack(side="right")
+
+        def start_rainbow_flash(frame: tk.Frame, body: tk.Frame) -> None:
+            after_id: list[str | None] = [None]
+
+            def step() -> None:
+                r, g, b = colorsys.hsv_to_rgb(random.random(), 1.0, 1.0)
+                color = f"#{int(r * 255):02x}{int(g * 255):02x}{int(b * 255):02x}"
+                try:
+                    body.configure(bg=color)
+                    after_id[0] = frame.after(150, step)
+                except tk.TclError:
+                    pass
+
+            def on_destroy(event: tk.Event) -> None:
+                if event.widget is frame and after_id[0] is not None:
+                    frame.after_cancel(after_id[0])
+
+            frame.bind("<Destroy>", on_destroy)
+            step()
+
+        progress_var:  list[tk.StringVar | None] = [None]
+        progress_bar:  list[ttk.Progressbar | None] = [None]
+        bar_mode:      list[str] = ["indeterminate"]
+
+        def build_loading() -> tk.Frame:
+            frame = tk.Frame(self, bg=DARK_BG)
+            add_header_with_question(frame)
+            add_back_button(frame)
+            body = tk.Frame(frame, bg=DARK_BG)
+            body.pack(fill="both", expand=True)
+            centre_panel = tk.Frame(body, bg=PANEL_BG)
+            centre_panel.pack(fill="both", expand=True, padx=8, pady=8)
+            var = tk.StringVar(value="Getting ready...")
+            progress_var[0] = var
+            tk.Label(
+                centre_panel, textvariable=var,
+                font=FONT_BODY, fg=TEXT, bg=PANEL_BG, justify="center",
+            ).pack(expand=True, pady=(20, 8))
+            bar = ttk.Progressbar(
+                centre_panel, orient="horizontal",
+                length=300, mode="indeterminate", maximum=100,
+            )
+            bar.pack(pady=(0, 24))
+            bar.start(15)
+            progress_bar[0] = bar
+            return frame
+
+        self._swap_frame(build_loading, no_border=True)
+
+        def update_status(message: str) -> None:
+            if progress_var[0] is not None:
+                progress_var[0].set(message)
+
+        def update_progress(download_info: dict) -> None:
+            status = download_info.get("status")
+            if status == "finished":
+                self.after(0, lambda: update_status("Merging streams..."))
+                def to_indeterminate() -> None:
+                    bar = progress_bar[0]
+                    if bar is not None and bar_mode[0] == "determinate":
+                        bar.configure(mode="indeterminate")
+                        bar.start(15)
+                        bar_mode[0] = "indeterminate"
+                self.after(0, to_indeterminate)
+            elif status == "downloading":
+                downloaded = download_info.get("downloaded_bytes", 0)
+                total = download_info.get("total_bytes") or download_info.get("total_bytes_estimate", 0)
+                if total:
+                    pct = int(downloaded / total * 100)
+                    self.after(0, lambda p=pct: update_status(f"Downloading video... {p}%"))
+                    def to_determinate(p: int) -> None:
+                        bar = progress_bar[0]
+                        if bar is not None:
+                            if bar_mode[0] == "indeterminate":
+                                bar.stop()
+                                bar.configure(mode="determinate")
+                                bar_mode[0] = "determinate"
+                            bar.configure(value=p)
+                    self.after(0, lambda p=pct: to_determinate(p))
+
+        def on_download_done(video_path: Path, audio_path: Path) -> None:
+            def build_player() -> tk.Frame:
+                import winsound
+                moviepy_editor = importlib.import_module("moviepy")
+                pil_image      = importlib.import_module("PIL.Image")
+                pil_imagetk    = importlib.import_module("PIL.ImageTk")
+
+                video    = moviepy_editor.VideoFileClip(str(video_path))
+                fps      = video.fps
+                duration = video.duration
+
+                frame = tk.Frame(self, bg=DARK_BG)
+                add_header_with_question(frame)
+                add_back_button(frame)
+
+                body = tk.Frame(frame, bg=DARK_BG)
+                body.pack(fill="both", expand=True)
+                display = tk.Label(body, bg="black")
+                display.pack(fill="both", expand=True, padx=8, pady=8)
+                start_rainbow_flash(frame, body)
+
+                playing:      list[bool]            = [True]
+                photo_ref:    list[object]          = [None]
+                display_size: list[tuple[int, int]] = [(640, 360)]
+                frame_queue:  queue.Queue           = queue.Queue(maxsize=4)
+
+                def on_display_configure(event: tk.Event) -> None:
+                    if event.widget is display:
+                        display_size[0] = (max(event.width, 1), max(event.height, 1))
+
+                display.bind("<Configure>", on_display_configure)
+
+                audio_still_playing = (
+                    self._dance_audio_start is not None
+                    and time.monotonic() - self._dance_audio_start < duration
+                )
+                if audio_still_playing:
+                    start_time: list[float] = [self._dance_audio_start]  # type: ignore[list-item]
+                else:
+                    self._dance_audio_start = time.monotonic()
+                    start_time = [self._dance_audio_start]
+                    winsound.PlaySound(str(audio_path), winsound.SND_FILENAME | winsound.SND_ASYNC)
+
+                def decode_worker() -> None:
+                    while playing[0]:
+                        elapsed = time.monotonic() - start_time[0]
+                        if elapsed >= duration:
+                            break
+                        try:
+                            img_array = video.get_frame(elapsed)
+                            width, height = display_size[0]
+                            img = pil_image.fromarray(img_array)
+                            img.thumbnail((width, height), pil_image.BILINEAR)
+                            frame_queue.put(img, timeout=0.05)
+                        except Exception:
+                            break
+                        next_frame_time = start_time[0] + (int(elapsed * fps) + 1) / fps
+                        sleep_duration = next_frame_time - time.monotonic()
+                        if sleep_duration > 0:
+                            time.sleep(sleep_duration)
+                    try:
+                        video.close()
+                    except Exception:
+                        pass
+
+                threading.Thread(target=decode_worker, daemon=True).start()
+
+                def show_frame() -> None:
+                    if not playing[0]:
+                        return
+                    try:
+                        img = frame_queue.get_nowait()
+                        photo_ref[0] = pil_imagetk.PhotoImage(img)
+                        display.configure(image=photo_ref[0])
+                    except queue.Empty:
+                        pass
+                    self.after(16, show_frame)
+
+                def on_destroy(event: tk.Event) -> None:
+                    if event.widget is frame:
+                        playing[0] = False
+                        try:
+                            video.close()
+                        except Exception:
+                            pass
+
+                frame.bind("<Destroy>", on_destroy)
+                self.after(50, show_frame)
+                return frame
+
+            self._swap_frame(build_player, no_border=True)
+
+        def on_dance_error(error: str) -> None:
+            def build_error() -> tk.Frame:
+                frame = tk.Frame(self, bg=DARK_BG)
+                add_header_with_question(frame)
+                add_back_button(frame)
+                body = tk.Frame(frame, bg=DARK_BG)
+                body.pack(fill="both", expand=True)
+                start_rainbow_flash(frame, body)
+                centre_panel = tk.Frame(body, bg=PANEL_BG)
+                centre_panel.pack(fill="both", expand=True, padx=8, pady=8)
+                tk.Label(
+                    centre_panel,
+                    text=f"Something went wrong.\n\n{error[:600]}",
+                    font=FONT_BODY, fg=TEXT_DIM, bg=PANEL_BG, justify="center",
+                ).pack(expand=True, pady=20)
+                return frame
+
+            self._swap_frame(build_error, no_border=True)
+
+        def download_worker() -> None:
+            global _yt_dlp, _HAS_MOVIEPY
+            try:
+                # Step 1: install any missing dependencies
+                to_install = []
+                if _yt_dlp is None:
+                    to_install.append("yt-dlp")
+                if not _HAS_MOVIEPY:
+                    to_install.extend(["moviepy", "Pillow", "imageio-ffmpeg"])
+                if to_install:
+                    label = ", ".join(to_install)
+                    self.after(0, lambda lb=label: update_status(f"Installing {lb}..."))
+                    result = subprocess.run(
+                        [sys.executable, "-m", "pip", "install", *to_install],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                    )
+                    if result.returncode != 0:
+                        raise RuntimeError(result.stdout[-600:])
+                    if _yt_dlp is None:
+                        _yt_dlp = importlib.import_module("yt_dlp")  # type: ignore[assignment]
+                    _HAS_MOVIEPY = True
+
+                # Step 2: download video if not already cached
+                self.after(0, lambda: update_status("Downloading video..."))
+                cache_file = _DANCE_CACHE_FILE
+                cache_file.parent.mkdir(parents=True, exist_ok=True)
+                if not cache_file.exists():
+                    ydl_opts = {
+                        "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/mp4/best",
+                        "outtmpl": str(cache_file),
+                        "merge_output_format": "mp4",
+                        "quiet": True,
+                        "no_warnings": True,
+                        "progress_hooks": [update_progress],
+                    }
+                    with _yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore[union-attr]
+                        ydl.download([_DANCE_VIDEO_URL])
+                if not cache_file.exists():
+                    raise FileNotFoundError("File not found after download completed.")
+
+                # Step 3: extract audio to WAV if not already cached
+                audio_file = _DANCE_AUDIO_FILE
+                if not audio_file.exists():
+                    self.after(0, lambda: update_status("Preparing audio..."))
+                    with _DANCE_AUDIO_LOCK:
+                        moviepy_editor = importlib.import_module("moviepy")
+                        clip = moviepy_editor.VideoFileClip(str(cache_file))
+                        clip.audio.write_audiofile(str(audio_file), logger=None)
+                        clip.close()
+
+                self.after(0, lambda: on_download_done(cache_file, audio_file))
+            except Exception as exc:
+                self.after(0, lambda error=str(exc): on_dance_error(error))
+
+        threading.Thread(target=download_worker, daemon=True).start()
 
 
 # -------------------------

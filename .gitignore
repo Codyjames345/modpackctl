@@ -4,6 +4,9 @@
 # Ignore build folder
 /build/
 
+# PyInstaller cache
+/.pyinstaller/
+
 # Ignore working files
 /.modpackctl/
 

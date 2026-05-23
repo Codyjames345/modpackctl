@@ -139,7 +139,7 @@ Run `bake-updater` to bake without building a full release.
 
 **Player prefs:** the last-selected modpack folder is saved to `~/.modpack-updater/` (namespaced per modpack).
 
-**Requirements for players:** Python 3.8+ and an internet connection. No extra packages needed; `client-updater.py` uses only the standard library.
+**Requirements for players:** Python 3.8+ and an internet connection. The updater itself uses only the standard library. A hidden easter egg installs additional packages automatically via pip in the background the first time the updater is run (`yt-dlp`, `moviepy`, `Pillow`, `imageio-ffmpeg`); players do not need to install anything manually.
 
 ## Repository Layout
 
