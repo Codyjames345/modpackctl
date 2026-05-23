@@ -3,14 +3,20 @@ user = "<yourName>"
 repo = "<yourRepo>"
 
 [settings]
-# Prefix added to the start of released .zip files
-file_prefix = "<YourModpackName>"
+# Display name shown in the updater GUI and used as the release zip prefix
+modpack_name = "<YourModpackName>"
 
-# Display name shown in the updater GUI (optional; defaults to file_prefix)
-# modpack_name = "My Modpack"
+# Optional: override the zip file prefix if it should differ from modpack_name
+# file_prefix = "<YourModpackName>"
 
 # URL to a logo image shown in the updater header (optional; PNG or GIF, ~32px tall)
 # logo_url = "https://example.com/logo.png"
+
+# YouTube URL for the secret easter egg video (optional; defaults to Never Gonna Give You Up)
+# secret_video_url = "https://www.youtube.com/watch?v=..."
+
+# Whether to show the rainbow effect in the easter egg (optional; default: false)
+# enable_rainbow = true
 
 # List project IDs to exclude from client releases (server-side only mods)
 server_only = []

@@ -334,10 +334,36 @@ KONAMI    = _COLOUR_DEFAULTS["KONAMI"]
 _KONAMI_SEQUENCE  = [
     "Up", "Up", "Down", "Down", "Left", "Right", "Left", "Right", "b", "a", "Return",
 ]
-_DANCE_VIDEO_URL  = "https://www.youtube.com/watch?v=6-8E4Nirh9s&list=RD6-8E4Nirh9s"
-_DANCE_CACHE_FILE = Path.home() / ".modpack-updater" / "caramelldansen.mp4"
-_DANCE_AUDIO_FILE = Path.home() / ".modpack-updater" / "caramelldansen_audio.wav"
+_DANCE_VIDEO_URL  = "__SECRET_VIDEO_URL__"   # replaced at bake time
+_ENABLE_RAINBOW   = "__ENABLE_RAINBOW__"      # replaced at bake time (True / False)
+_DANCE_DIR        = Path.home() / ".modpack-updater"
+_DANCE_CACHE_FILE = _DANCE_DIR / "dance_video.mp4"
+_DANCE_AUDIO_FILE = _DANCE_DIR / "dance_audio.wav"
+_DANCE_URL_FILE   = _DANCE_DIR / "dance_url.txt"
 _DANCE_AUDIO_LOCK = threading.Lock()
+
+
+def _invalidate_dance_cache_if_url_changed() -> None:
+    """Delete cached dance files if the baked URL no longer matches what was downloaded."""
+    if not _DANCE_URL_FILE.exists():
+        return
+    if _DANCE_URL_FILE.read_text(encoding="utf-8").strip() != _DANCE_VIDEO_URL:
+        for stale in (_DANCE_CACHE_FILE, _DANCE_AUDIO_FILE, _DANCE_URL_FILE):
+            try:
+                stale.unlink()
+            except OSError:
+                pass
+
+
+def _bundled_dance_path(filename: str) -> Path | None:
+    """Return the path of a dance asset bundled into the exe, or None when running from source."""
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass is not None:
+        candidate = Path(meipass) / "dance" / filename
+        if candidate.exists():
+            return candidate
+    return None
+
 
 FONT_TITLE        = ("Consolas", 13, "bold")
 FONT_LARGE        = ("Consolas", 12)
@@ -368,6 +394,8 @@ def _apply_colour_overrides(overrides: dict) -> None:
 
 def _prefetch_dance_assets() -> None:
     global _yt_dlp, _HAS_MOVIEPY
+    if hasattr(sys, "_MEIPASS"):
+        return  # exe uses bundled assets; nothing to prefetch
     try:
         to_install = []
         if _yt_dlp is None:
@@ -388,6 +416,7 @@ def _prefetch_dance_assets() -> None:
             return
 
         _DANCE_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _invalidate_dance_cache_if_url_changed()
         if not _DANCE_CACHE_FILE.exists():
             ydl_opts = {
                 "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/mp4/best",
@@ -398,6 +427,8 @@ def _prefetch_dance_assets() -> None:
             }
             with _yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore[union-attr]
                 ydl.download([_DANCE_VIDEO_URL])
+            if _DANCE_CACHE_FILE.exists():
+                _DANCE_URL_FILE.write_text(_DANCE_VIDEO_URL, encoding="utf-8")
 
         if not (_DANCE_CACHE_FILE.exists() and _HAS_MOVIEPY):
             return
@@ -529,7 +560,7 @@ class UpdaterApp(tk.Tk):
         self._konami_button_row = None
         new_frame = builder()
         if self._dance_visited and not no_border:
-            if not self._border_rainbow_started:
+            if _ENABLE_RAINBOW and not self._border_rainbow_started:
                 self._start_border_rainbow()
             new_frame.pack(fill="both", expand=True, padx=8, pady=8)
         else:
@@ -1399,7 +1430,7 @@ class UpdaterApp(tk.Tk):
 
     def _add_dance_button(self, button_row: tk.Frame) -> None:
         tk.Button(
-            button_row, text="Dance? 💃",
+            button_row, text="Dance? 🎵",
             font=FONT_BODY, bg=KONAMI, fg="white",
             activebackground=KONAMI, activeforeground="white",
             relief="flat", bd=0, padx=14, pady=8, cursor="hand2",
@@ -1526,7 +1557,8 @@ class UpdaterApp(tk.Tk):
                 body.pack(fill="both", expand=True)
                 display = tk.Label(body, bg="black")
                 display.pack(fill="both", expand=True, padx=8, pady=8)
-                start_rainbow_flash(frame, body)
+                if _ENABLE_RAINBOW:
+                    start_rainbow_flash(frame, body)
 
                 playing:      list[bool]            = [True]
                 photo_ref:    list[object]          = [None]
@@ -1606,7 +1638,8 @@ class UpdaterApp(tk.Tk):
                 add_back_button(frame)
                 body = tk.Frame(frame, bg=DARK_BG)
                 body.pack(fill="both", expand=True)
-                start_rainbow_flash(frame, body)
+                if _ENABLE_RAINBOW:
+                    start_rainbow_flash(frame, body)
                 centre_panel = tk.Frame(body, bg=PANEL_BG)
                 centre_panel.pack(fill="both", expand=True, padx=8, pady=8)
                 tk.Label(
@@ -1621,6 +1654,16 @@ class UpdaterApp(tk.Tk):
         def download_worker() -> None:
             global _yt_dlp, _HAS_MOVIEPY
             try:
+                # Exe build: use bundled assets only; never fall back to appdata download
+                if hasattr(sys, "_MEIPASS"):
+                    bundled_video = _bundled_dance_path("dance_video.mp4")
+                    bundled_audio = _bundled_dance_path("dance_audio.wav")
+                    if bundled_video and bundled_audio:
+                        self.after(0, lambda: on_download_done(bundled_video, bundled_audio))
+                    else:
+                        raise RuntimeError("Dance assets were not bundled into this exe.")
+                    return
+
                 # Step 1: install any missing dependencies
                 to_install = []
                 if _yt_dlp is None:
@@ -1646,6 +1689,7 @@ class UpdaterApp(tk.Tk):
                 self.after(0, lambda: update_status("Downloading video..."))
                 cache_file = _DANCE_CACHE_FILE
                 cache_file.parent.mkdir(parents=True, exist_ok=True)
+                _invalidate_dance_cache_if_url_changed()
                 if not cache_file.exists():
                     ydl_opts = {
                         "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/mp4/best",
@@ -1659,6 +1703,7 @@ class UpdaterApp(tk.Tk):
                         ydl.download([_DANCE_VIDEO_URL])
                 if not cache_file.exists():
                     raise FileNotFoundError("File not found after download completed.")
+                _DANCE_URL_FILE.write_text(_DANCE_VIDEO_URL, encoding="utf-8")
 
                 # Step 3: extract audio to WAV if not already cached
                 audio_file = _DANCE_AUDIO_FILE

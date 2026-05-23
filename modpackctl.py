@@ -38,8 +38,13 @@ CONFIG_FILE     = Path("modpackctl.toml")
 
 BUILD         = Path("build")
 RELEASES      = Path("releases")
-UPDATE_SCRIPT  = Path("client-updater-template.py")   # source template (never modified at runtime)
-BAKED_UPDATER  = RELEASES / "client-updater.py"        # baked output written during release/bake
+UPDATE_SCRIPT       = Path("client-updater-template.py")   # source template (never modified at runtime)
+_DANCE_DEFAULT_URL  = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+
+
+def _baked_updater_path() -> Path:
+    """Return releases/{file_prefix}-updater.py — the baked output written during release/bake."""
+    return RELEASES / f"{get_file_prefix()}-updater.py"
 
 CF_URL  = "https://api.cfwidget.com/{}"
 HEADERS = {"User-Agent": "modpackctl/1.0"}
@@ -69,6 +74,12 @@ modpack_name = "<YourModpackName>"
 
 # URL to a logo image shown in the updater header (optional; PNG or GIF, ~32px tall)
 # logo_url = "https://example.com/logo.png"
+
+# YouTube URL for the secret easter egg video (optional; defaults to Never Gonna Give You Up)
+# secret_video_url = "https://www.youtube.com/watch?v=..."
+
+# Whether to show the rainbow effect in the easter egg (optional; default: false)
+# enable_rainbow = true
 
 # List project IDs to exclude from client releases (server-side only mods)
 server_only = []
@@ -125,6 +136,12 @@ def get_filter_list(key: str) -> set[str]:
 # -------------------------
 # HELPERS
 # -------------------------
+
+
+def _run(cmd: list, **kwargs) -> subprocess.CompletedProcess:
+    """Print a command then run it via subprocess.run."""
+    print(f"$ {' '.join(str(arg) for arg in cmd)}")
+    return subprocess.run(cmd, **kwargs)
 
 
 def load_json(path: Path, default: _JsonT) -> _JsonT:
@@ -1140,6 +1157,7 @@ def release(
 
 def release_client(version: str) -> Path | None:
     """Build a client release zip, excluding any mods in the server_only list, and bake client-updater-template.py."""
+    print(f"Building client release for v{version}...")
     excluded = get_filter_list("server_only")
     if not excluded:
         print("[WARN] No server_only list found in config — building full release.")
@@ -1148,14 +1166,7 @@ def release_client(version: str) -> Path | None:
     zip_path = release(version, exclude=excluded, suffix="client")
     if zip_path:
         if bake_updater():
-            print(f"[OK] Baked {UPDATE_SCRIPT.name} → {BAKED_UPDATER}")
-            print("Building client-updater.exe...")
-            exe_path = _build_exe(BAKED_UPDATER)
-            if exe_path:
-                print(f"[OK] client-updater.exe built.")
-            else:
-                print("[WARN] PyInstaller build failed — exe not included in release.")
-                print("       Install build deps: pip install pyinstaller yt-dlp moviepy Pillow imageio-ffmpeg")
+            _build_exe(_baked_updater_path())
     return zip_path
 
 
@@ -1259,8 +1270,9 @@ def _push_pages_assets() -> None:
     the branch as an orphan if it does not yet exist. Uses a temporary git
     worktree to avoid switching the working branch.
     """
+    print("Pushing versions.json + snapshots to gh-pages...")
     try:
-        ls_result     = subprocess.run(
+        ls_result     = _run(
             ["git", "ls-remote", "--heads", "origin", "gh-pages"],
             capture_output=True, text=True, check=True,
         )
@@ -1268,20 +1280,20 @@ def _push_pages_assets() -> None:
 
         if not branch_exists:
             print("[INFO] Creating gh-pages branch...")
-            subprocess.run(["git", "checkout", "--orphan", "gh-pages"], check=True)
-            subprocess.run(["git", "rm", "-rf", "--cached", "."], check=True, capture_output=True)
+            _run(["git", "checkout", "--orphan", "gh-pages"], check=True)
+            _run(["git", "rm", "-rf", "--cached", "."], check=True, capture_output=True)
             _write_pages_assets(Path("."))
-            subprocess.run(["git", "add", "versions.json", "snapshots"], check=True)
-            subprocess.run(["git", "commit", "-m", "init: versions.json + snapshots"], check=True)
-            subprocess.run(["git", "push", "-u", "origin", "gh-pages"], check=True)
-            subprocess.run(["git", "checkout", "-"], check=True)
+            _run(["git", "add", "versions.json", "snapshots"], check=True)
+            _run(["git", "commit", "-m", "init: versions.json + snapshots"], check=True)
+            _run(["git", "push", "-u", "origin", "gh-pages"], check=True)
+            _run(["git", "checkout", "-"], check=True)
         else:
-            subprocess.run(["git", "worktree", "prune"], capture_output=True)
+            _run(["git", "worktree", "prune"], capture_output=True)
 
             worktree_path = Path(".gh-pages-worktree")
             if worktree_path.exists():
                 try:
-                    subprocess.run(
+                    _run(
                         ["git", "worktree", "remove", "--force", str(worktree_path)],
                         capture_output=True,
                     )
@@ -1291,23 +1303,23 @@ def _push_pages_assets() -> None:
                     shutil.rmtree(worktree_path, ignore_errors=True)
 
             # Clean up any leftover temp branch from a previous failed run
-            subprocess.run(["git", "branch", "-D", "gh-pages-temp"], capture_output=True)
-            subprocess.run(["git", "fetch", "origin", "gh-pages"], check=True)
-            subprocess.run(
+            _run(["git", "branch", "-D", "gh-pages-temp"], capture_output=True)
+            _run(["git", "fetch", "origin", "gh-pages"], check=True)
+            _run(
                 ["git", "worktree", "add", "-b", "gh-pages-temp",
                  str(worktree_path), "origin/gh-pages"],
                 check=True, capture_output=True,
             )
 
             _write_pages_assets(worktree_path)
-            subprocess.run(["git", "add", "versions.json", "snapshots"], check=True, cwd=worktree_path)
+            _run(["git", "add", "versions.json", "snapshots"], check=True, cwd=worktree_path)
 
             try:
-                subprocess.run(
+                _run(
                     ["git", "commit", "-m", "chore: update versions.json + snapshots"],
                     check=True, capture_output=True, text=True, cwd=worktree_path,
                 )
-                subprocess.run(
+                _run(
                     ["git", "push", "origin", "HEAD:gh-pages"],
                     check=True, cwd=worktree_path,
                 )
@@ -1318,10 +1330,10 @@ def _push_pages_assets() -> None:
                 else:
                     raise
 
-            subprocess.run(
+            _run(
                 ["git", "worktree", "remove", "--force", str(worktree_path)], check=True
             )
-            subprocess.run(["git", "branch", "-D", "gh-pages-temp"], capture_output=True)
+            _run(["git", "branch", "-D", "gh-pages-temp"], capture_output=True)
 
         print("[OK] versions.json + snapshots pushed to gh-pages.")
     except subprocess.CalledProcessError as exc:
@@ -1381,18 +1393,124 @@ def _has_client_changes(version: str) -> bool:
     return bool(changes["added"] or changes["removed"] or changes["updated"])
 
 
+def _prepare_icon() -> Path | None:
+    """
+    Download the modpack logo from logo_url and convert it to a .ico file.
+    Returns the .ico path on success, or None if logo_url is unset or conversion fails.
+    """
+    import io
+    import urllib.request
+    cfg      = load_config()
+    logo_url = cfg.get("settings", {}).get("logo_url", "")
+    if not logo_url:
+        return None
+    try:
+        from PIL import Image
+        ico_path = Path(".pyinstaller") / "icon.ico"
+        ico_path.parent.mkdir(parents=True, exist_ok=True)
+        with urllib.request.urlopen(logo_url, timeout=10) as response:
+            image_data = response.read()
+        img = Image.open(io.BytesIO(image_data)).convert("RGBA")
+        # Pad to square then upscale to 256×256 so all ICO sizes are clean downscales
+        side = max(img.width, img.height, 256)
+        square = Image.new("RGBA", (side, side), (0, 0, 0, 0))
+        square.paste(img, ((side - img.width) // 2, (side - img.height) // 2))
+        square = square.resize((256, 256), Image.Resampling.LANCZOS)
+        square.save(str(ico_path), format="ICO", sizes=[(16, 16), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
+        print(f"[OK] Icon prepared from {logo_url}")
+        return ico_path
+    except Exception as exc:
+        print(f"[WARN] Could not prepare icon — exe will use the default: {exc}")
+        return None
+
+
+def _prepare_dance_assets() -> tuple[Path, Path] | None:
+    """
+    Download the dance video and extract its audio into .pyinstaller/dance/ for bundling.
+    Returns (video_path, audio_path) on success, or None if unavailable.
+    """
+    cfg        = load_config()
+    dance_url  = cfg.get("settings", {}).get("secret_video_url", _DANCE_DEFAULT_URL)
+    dance_dir  = Path(".pyinstaller") / "dance"
+    dance_dir.mkdir(parents=True, exist_ok=True)
+    video_path = dance_dir / "dance_video.mp4"
+    audio_path = dance_dir / "dance_audio.wav"
+    url_record = dance_dir / "url.txt"
+
+    try:
+        import yt_dlp as ydl_module
+    except ImportError:
+        print("[WARN] yt-dlp not installed — dance video will not be bundled (players will download at runtime).")
+        return None
+
+    cached_url = url_record.read_text(encoding="utf-8").strip() if url_record.exists() else ""
+    url_changed = cached_url != dance_url
+    if url_changed and video_path.exists():
+        video_path.unlink()
+        if audio_path.exists():
+            audio_path.unlink()
+
+    if not video_path.exists():
+        print("Downloading dance video for bundling...")
+        ydl_opts = {
+            "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/mp4/best",
+            "outtmpl": str(video_path),
+            "merge_output_format": "mp4",
+            "noplaylist": True,
+            "no_warnings": True,
+        }
+        with ydl_module.YoutubeDL(ydl_opts) as ydl:  # type: ignore[arg-type]
+            ydl.download([dance_url])
+        if video_path.exists():
+            url_record.write_text(dance_url, encoding="utf-8")
+
+    if not video_path.exists():
+        print("[WARN] Dance video download failed — not bundling.")
+        return None
+
+    if not audio_path.exists():
+        print("Extracting dance audio for bundling...")
+        try:
+            import moviepy
+            clip = moviepy.VideoFileClip(str(video_path))
+            if clip.audio is None:
+                raise RuntimeError("Video has no audio track.")
+            clip.audio.write_audiofile(str(audio_path), logger=None)
+            clip.close()
+        except Exception as exc:
+            print(f"[WARN] Could not extract dance audio — not bundling: {exc}")
+            return None
+
+    print("[OK] Dance assets ready for bundling.")
+    return video_path, audio_path
+
+
 def _build_exe(source_py: Path) -> Path | None:
     """
     Build a standalone Windows exe from source_py using PyInstaller.
+    Prints its own progress, success, and warning messages.
     Returns the exe path on success, or None if PyInstaller is unavailable or fails.
     """
     exe_path = source_py.parent / (source_py.stem + ".exe")
+    print(f"Building {exe_path.name}...")
+    icon_path   = _prepare_icon()
+    icon_args   = ["--icon", str(icon_path.resolve())] if icon_path else []
+    dance_paths = _prepare_dance_assets()
+    dance_args: list[str] = []
+    if dance_paths:
+        video_file, audio_file = dance_paths
+        dance_args = [
+            "--add-data", f"{video_file.resolve()};dance",
+            "--add-data", f"{audio_file.resolve()};dance",
+        ]
     try:
-        subprocess.run(
+        _run(
             [
                 sys.executable, "-m", "PyInstaller",
                 "--onefile", "--windowed",
                 "--name", source_py.stem,
+                *icon_args,
+                *dance_args,
                 "--collect-all", "yt_dlp",
                 "--collect-all", "moviepy",
                 "--collect-all", "imageio",
@@ -1406,26 +1524,46 @@ def _build_exe(source_py: Path) -> Path | None:
             check=True,
         )
     except FileNotFoundError:
+        print("[WARN] PyInstaller not found — exe not built.")
+        print("       Install build deps: pip install pyinstaller yt-dlp moviepy Pillow imageio-ffmpeg")
         return None
     except subprocess.CalledProcessError:
+        print("[WARN] PyInstaller build failed — exe not built.")
+        print("       Install build deps: pip install pyinstaller yt-dlp moviepy Pillow imageio-ffmpeg")
         return None
-    return exe_path if exe_path.exists() else None
+    if not exe_path.exists():
+        print("[WARN] PyInstaller finished but exe was not produced.")
+        return None
+    print(f"[OK] Built {exe_path}")
+    if icon_path:
+        _clear_icon_cache()
+    return exe_path
+
+
+def _clear_icon_cache() -> None:
+    """Delete Windows icon cache DB files and restart Explorer so the new icon shows immediately."""
+    import glob
+    answer = input("Clear Windows icon cache so the new icon appears immediately? (Explorer will restart) [y/n] ").strip().lower()
+    if answer != "y":
+        print("[INFO] Skipped icon cache clear — the new icon may not appear.")
+        return
+    cache_dir = Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "Windows" / "Explorer"
+    db_files  = glob.glob(str(cache_dir / "iconcache_*.db"))
+    subprocess.run(["taskkill", "/f", "/im", "explorer.exe"], capture_output=True)
+    for db_file in db_files:
+        try:
+            os.remove(db_file)
+        except OSError:
+            pass
+    subprocess.Popen(["explorer.exe"])
+    print("[OK] Icon cache cleared — new icon will now appear.")
 
 
 def build_exe() -> None:
-    """Build releases/client-updater.exe from the baked releases/client-updater.py."""
-    baked_updater_path = BAKED_UPDATER
-    if not baked_updater_path.exists():
-        print("[ERROR] releases/client-updater.py not found.")
-        print("        Run 'python modpackctl.py bake-updater' first.")
+    """Build the baked updater exe from releases/{file_prefix}-updater.py."""
+    if not bake_updater():
         sys.exit(1)
-    print("Building client-updater.exe...")
-    exe_path = _build_exe(baked_updater_path)
-    if exe_path:
-        print(f"[OK] Built {exe_path}")
-    else:
-        print("[ERROR] PyInstaller build failed.")
-        print("        Install build deps: pip install pyinstaller yt-dlp moviepy Pillow imageio-ffmpeg")
+    if not _build_exe(_baked_updater_path()):
         sys.exit(1)
 
 
@@ -1458,7 +1596,6 @@ def publish(version: str, message: str = "") -> None:
     elif message != log_entry.get("message", ""):
         set_version_message(version, message)
 
-    print(f"Building client release for v{version}...")
     zip_path = release_client(version)
     if not zip_path or not zip_path.exists():
         print("[ERROR] Release build failed — cannot publish.")
@@ -1467,21 +1604,21 @@ def publish(version: str, message: str = "") -> None:
     notes_path = _get_notes_file_for_release(version, message=message, side="client")
     tag        = f"v{version}"
 
-    baked_updater_path = BAKED_UPDATER
-    baked_exe_path     = RELEASES / "client-updater.exe"
+    baked_updater_path = _baked_updater_path()
+    baked_exe_path     = baked_updater_path.with_suffix(".exe")
 
     release_assets = [str(zip_path)]
     if baked_updater_path.exists():
         release_assets.append(str(baked_updater_path))
     else:
-        print("[WARN] releases/client-updater.py not found — not uploading updater.")
+        print(f"[WARN] {baked_updater_path.name} not found — not uploading updater.")
     if baked_exe_path.exists():
         release_assets.append(str(baked_exe_path))
 
     print(f"Creating GitHub Release {tag}...")
     release_ok = False
     try:
-        subprocess.run(
+        _run(
             [
                 "gh", "release", "create", tag,
                 *release_assets,
@@ -1500,7 +1637,6 @@ def publish(version: str, message: str = "") -> None:
     finally:
         notes_path.unlink(missing_ok=True)
 
-    print("Pushing versions.json + snapshots to gh-pages...")
     pages_ok = True
     try:
         _push_pages_assets()
@@ -1542,30 +1678,37 @@ def build_pages() -> None:
 def bake_updater() -> bool:
     """
     Substitute config placeholders in client-updater-template.py and write the result to
-    releases/client-updater.py. Returns False if client-updater-template.py is not present.
+    releases/{file_prefix}-updater.py. Returns False if client-updater-template.py is not present.
 
     Supported placeholders (written as bare Python string literals in client-updater-template.py):
-      __GITHUB_USER__   — GitHub username from modpackctl.toml
-      __GITHUB_REPO__   — GitHub repo name from modpackctl.toml
-      __MODPACK_NAME__  — settings.modpack_name from modpackctl.toml
-      __LOGO_URL__      — logo URL from modpackctl.toml (empty string if unset)
+      __GITHUB_USER__      — GitHub username from modpackctl.toml
+      __GITHUB_REPO__      — GitHub repo name from modpackctl.toml
+      __MODPACK_NAME__     — settings.modpack_name from modpackctl.toml
+      __LOGO_URL__         — logo URL from modpackctl.toml (empty string if unset)
+      __SECRET_VIDEO_URL__ — easter egg video URL (defaults to Never Gonna Give You Up)
+      __ENABLE_RAINBOW__   — True/False; settings.enable_rainbow from modpackctl.toml (default: True)
     """
     if not UPDATE_SCRIPT.exists():
         print(f"[WARN] {UPDATE_SCRIPT} not found — skipping updater bake.")
         return False
-    user, repo   = get_github_info()
-    cfg          = load_config()
-    settings     = cfg.get("settings", {})
-    modpack_name = settings.get("modpack_name", "")
-    logo_url     = settings.get("logo_url", "")
+    user, repo        = get_github_info()
+    cfg               = load_config()
+    settings          = cfg.get("settings", {})
+    modpack_name      = settings.get("modpack_name", "")
+    logo_url          = settings.get("logo_url", "")
+    secret_video_url  = settings.get("secret_video_url", _DANCE_DEFAULT_URL)
+    enable_rainbow    = settings.get("enable_rainbow", False)
     content = UPDATE_SCRIPT.read_text(encoding="utf-8")
-    content = content.replace('"__GITHUB_USER__"',  f'"{user}"')
-    content = content.replace('"__GITHUB_REPO__"',  f'"{repo}"')
-    content = content.replace('"__MODPACK_NAME__"', f'"{modpack_name}"')
-    content = content.replace('"__LOGO_URL__"',     f'"{logo_url}"')
-    dest_path = BAKED_UPDATER
+    content = content.replace('"__GITHUB_USER__"',      f'"{user}"')
+    content = content.replace('"__GITHUB_REPO__"',      f'"{repo}"')
+    content = content.replace('"__MODPACK_NAME__"',     f'"{modpack_name}"')
+    content = content.replace('"__LOGO_URL__"',         f'"{logo_url}"')
+    content = content.replace('"__SECRET_VIDEO_URL__"', f'"{secret_video_url}"')
+    content = content.replace('"__ENABLE_RAINBOW__"',   str(bool(enable_rainbow)))
+    dest_path = _baked_updater_path()
     dest_path.parent.mkdir(parents=True, exist_ok=True)
     dest_path.write_text(content, encoding="utf-8")
+    print(f"[OK] Baked {UPDATE_SCRIPT.name} → {dest_path}")
     return True
 
 
@@ -1793,7 +1936,7 @@ if __name__ == "__main__":
         if not bake_updater():
             print(f"[ERROR] Bake failed — is {UPDATE_SCRIPT} present in the project root?")
             sys.exit(1)
-        print(f"[OK] Baked {BAKED_UPDATER}")
+        print(f"[OK] Baked {_baked_updater_path()}")
 
     elif cmd == "export-example":
         example_path = Path("modpackctl.toml.example")
