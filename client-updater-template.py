@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import base64
 import colorsys
+import contextlib
 import importlib
+import io
 import json
 import os
 import queue
@@ -23,6 +25,7 @@ import time
 import tkinter as tk
 import urllib.error
 import urllib.request
+import winsound
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -35,10 +38,10 @@ except ImportError:
     _yt_dlp = None  # type: ignore[assignment]
 
 try:
-    import moviepy  # type: ignore[import-untyped]  # noqa: F401
-    _HAS_MOVIEPY = True
+    import imageio  # type: ignore[import-untyped]  # noqa: F401
+    _HAS_IMAGEIO = True
 except ImportError:
-    _HAS_MOVIEPY = False
+    _HAS_IMAGEIO = False
 
 # -------------------------
 # CONFIG  (baked in at release time by modpackctl)
@@ -335,12 +338,38 @@ _KONAMI_SEQUENCE  = [
     "Up", "Up", "Down", "Down", "Left", "Right", "Left", "Right", "b", "a", "Return",
 ]
 _DANCE_VIDEO_URL  = "__SECRET_VIDEO_URL__"   # replaced at bake time
+_ENABLE_SECRET    = "__ENABLE_SECRET__"       # replaced at bake time (True / False)
 _ENABLE_RAINBOW   = "__ENABLE_RAINBOW__"      # replaced at bake time (True / False)
-_DANCE_DIR        = Path.home() / ".modpack-updater"
-_DANCE_CACHE_FILE = _DANCE_DIR / "dance_video.mp4"
-_DANCE_AUDIO_FILE = _DANCE_DIR / "dance_audio.wav"
-_DANCE_URL_FILE   = _DANCE_DIR / "dance_url.txt"
-_DANCE_AUDIO_LOCK = threading.Lock()
+_APPDATA_DIR        = Path.home() / ".modpack-updater"
+_DANCE_VIDEO_FILE = _APPDATA_DIR / "dance_video.mp4"
+_DANCE_AUDIO_FILE = _APPDATA_DIR / "dance_audio.wav"
+_DANCE_URL_FILE   = _APPDATA_DIR / "dance_url.txt"
+_DANCE_WARMUP_WAV = _APPDATA_DIR / "warmup.wav"
+_DANCE_AUDIO_LOCK     = threading.Lock()
+_DANCE_ASSETS_READY   = threading.Event()
+_DANCE_ASSETS_ERROR:   list[str | None] = [None]
+_DANCE_CURRENT_STATUS: list[str]        = ["Getting ready..."]
+_DANCE_CACHED_FPS:      list[float]     = [0.0]
+_DANCE_CACHED_DURATION: list[float]     = [0.0]
+
+
+def _generate_silent_wav(path: Path, duration_ms: int = 100) -> None:
+    """Write a minimal silent stereo 16-bit 44100 Hz WAV to path."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    sample_rate = 44100
+    num_samples = sample_rate * duration_ms // 1000
+    data_size   = num_samples * 4  # stereo, 2 bytes/sample
+    riff_size   = 36 + data_size
+    path.write_bytes(
+        b"RIFF" + riff_size.to_bytes(4, "little")
+        + b"WAVEfmt \x10\x00\x00\x00"      # fmt chunk, 16 bytes
+        + b"\x01\x00\x02\x00"              # PCM, 2 channels
+        + sample_rate.to_bytes(4, "little")
+        + (sample_rate * 4).to_bytes(4, "little")  # byte rate
+        + b"\x04\x00\x10\x00"              # block align=4, bits/sample=16
+        + b"data" + data_size.to_bytes(4, "little")
+        + bytes(data_size)
+    )
 
 
 def _invalidate_dance_cache_if_url_changed() -> None:
@@ -348,7 +377,7 @@ def _invalidate_dance_cache_if_url_changed() -> None:
     if not _DANCE_URL_FILE.exists():
         return
     if _DANCE_URL_FILE.read_text(encoding="utf-8").strip() != _DANCE_VIDEO_URL:
-        for stale in (_DANCE_CACHE_FILE, _DANCE_AUDIO_FILE, _DANCE_URL_FILE):
+        for stale in (_DANCE_VIDEO_FILE, _DANCE_AUDIO_FILE, _DANCE_URL_FILE):
             try:
                 stale.unlink()
             except OSError:
@@ -393,54 +422,103 @@ def _apply_colour_overrides(overrides: dict) -> None:
 # -------------------------
 
 def _prefetch_dance_assets() -> None:
-    global _yt_dlp, _HAS_MOVIEPY
+    global _yt_dlp, _HAS_IMAGEIO
     if hasattr(sys, "_MEIPASS"):
-        return  # exe uses bundled assets; nothing to prefetch
+        _DANCE_ASSETS_READY.set()  # bundled exe — assets are always present
+        return
     try:
         to_install = []
         if _yt_dlp is None:
             to_install.append("yt-dlp")
-        if not _HAS_MOVIEPY:
-            to_install.extend(["moviepy", "Pillow", "imageio-ffmpeg"])
+        if not _HAS_IMAGEIO:
+            to_install.extend(["Pillow", "imageio", "imageio-ffmpeg"])
         if to_install:
+            _DANCE_CURRENT_STATUS[0] = "Installing packages..."
             result = subprocess.run(
-                [sys.executable, "-m", "pip", "install", *to_install],
+                [sys.executable, "-m", "pip", "install", "--prefer-binary", *to_install],
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
             )
-            if result.returncode == 0:
-                if _yt_dlp is None:
-                    _yt_dlp = importlib.import_module("yt_dlp")  # type: ignore[assignment]
-                _HAS_MOVIEPY = True
+            if result.returncode != 0:
+                raise RuntimeError(result.stdout[-600:])
+            if _yt_dlp is None:
+                _yt_dlp = importlib.import_module("yt_dlp")  # type: ignore[assignment]
+            _HAS_IMAGEIO = True
 
-        if _yt_dlp is None:
-            return
+        if _yt_dlp is None or not _HAS_IMAGEIO:
+            raise RuntimeError("Required packages could not be installed.")
 
-        _DANCE_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _DANCE_VIDEO_FILE.parent.mkdir(parents=True, exist_ok=True)
         _invalidate_dance_cache_if_url_changed()
-        if not _DANCE_CACHE_FILE.exists():
+        if not _DANCE_VIDEO_FILE.exists():
+            _DANCE_CURRENT_STATUS[0] = "Downloading video..."
+            def _progress_hook(info: dict) -> None:
+                if info.get("status") == "downloading":
+                    total = info.get("total_bytes") or info.get("total_bytes_estimate", 0)
+                    done  = info.get("downloaded_bytes", 0)
+                    if total:
+                        pct = int(done / total * 100)
+                        _DANCE_CURRENT_STATUS[0] = f"Downloading video... {pct}%"
+                elif info.get("status") == "finished":
+                    _DANCE_CURRENT_STATUS[0] = "Merging streams..."
             ydl_opts = {
-                "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/mp4/best",
-                "outtmpl": str(_DANCE_CACHE_FILE),
+                "format": "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=480]+bestaudio/best[height<=480]/mp4/best",
+                "outtmpl": str(_DANCE_VIDEO_FILE),
                 "merge_output_format": "mp4",
                 "quiet": True,
                 "no_warnings": True,
+                "progress_hooks": [_progress_hook],
             }
             with _yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore[union-attr]
                 ydl.download([_DANCE_VIDEO_URL])
-            if _DANCE_CACHE_FILE.exists():
-                _DANCE_URL_FILE.write_text(_DANCE_VIDEO_URL, encoding="utf-8")
-
-        if not (_DANCE_CACHE_FILE.exists() and _HAS_MOVIEPY):
-            return
+            if not _DANCE_VIDEO_FILE.exists():
+                raise FileNotFoundError("Video download failed.")
+            _DANCE_URL_FILE.write_text(_DANCE_VIDEO_URL, encoding="utf-8")
 
         with _DANCE_AUDIO_LOCK:
             if not _DANCE_AUDIO_FILE.exists():
-                moviepy_mod = importlib.import_module("moviepy")
-                clip = moviepy_mod.VideoFileClip(str(_DANCE_CACHE_FILE))
-                clip.audio.write_audiofile(str(_DANCE_AUDIO_FILE), logger=None)
-                clip.close()
-    except Exception:
-        pass
+                _DANCE_CURRENT_STATUS[0] = "Preparing audio..."
+                imageio_ffmpeg_mod = importlib.import_module("imageio_ffmpeg")
+                ffmpeg_exe = imageio_ffmpeg_mod.get_ffmpeg_exe()
+                subprocess.run(
+                    [ffmpeg_exe, "-i", str(_DANCE_VIDEO_FILE),
+                     "-vn", "-acodec", "pcm_s16le", "-ar", "44100", "-ac", "2",
+                     str(_DANCE_AUDIO_FILE), "-y"],
+                    check=True, capture_output=True,
+                )
+        # Pre-cache fps and duration so build_player never needs a probe reader on
+        # the main thread (which would cause a visible lag spike).
+        if _DANCE_CACHED_FPS[0] == 0.0 and _DANCE_VIDEO_FILE.exists():
+            try:
+                imageio_mod = importlib.import_module("imageio")
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    probe = imageio_mod.get_reader(str(_DANCE_VIDEO_FILE), "ffmpeg")
+                meta = probe.get_meta_data()
+                probe.close()
+                fps_raw = meta.get("fps") or meta.get("source_fps")
+                _DANCE_CACHED_FPS[0]      = float(fps_raw) if fps_raw and float(fps_raw) > 0 else 30.0
+                _DANCE_CACHED_DURATION[0] = float(meta.get("duration") or 0)
+            except Exception:
+                pass
+    except Exception as exc:
+        _DANCE_ASSETS_ERROR[0] = str(exc)
+    finally:
+        _DANCE_ASSETS_READY.set()
+
+
+_MODLOADER_NAMES: dict[str, str] = {
+    "neoforge": "NeoForge",
+    "forge":    "Forge",
+    "fabric":   "Fabric",
+    "quilt":    "Quilt",
+}
+
+
+def _format_modloader(modloader_id: str) -> str:
+    """Convert a modloader id (e.g. 'neoforge-21.1.229') to a display string ('NeoForge 21.1.229')."""
+    if "-" in modloader_id:
+        prefix, version = modloader_id.split("-", 1)
+        return f"{_MODLOADER_NAMES.get(prefix, prefix.capitalize())} {version}"
+    return modloader_id
 
 
 # -------------------------
@@ -477,6 +555,7 @@ class UpdaterApp(tk.Tk):
         self.versions_list: list[str]       = []
         self.versions_data: dict            = {}
         self.release_message: str           = ""
+        self.target_modloader: str          = ""
         self.old_snapshot: dict             = {}
         self.new_snapshot: dict             = {}
         self.update_plan: dict              = {}
@@ -485,6 +564,7 @@ class UpdaterApp(tk.Tk):
         self._current_frame: tk.Frame | None        = None
         self._current_builder                       = None
         self._logo_image: tk.PhotoImage | None      = None
+        self._icon_image: tk.PhotoImage | None      = None
         self._header_logo_label: tk.Label | None    = None
         self._header_title_label: tk.Label | None   = None
         self._update_progress_label: tk.Label | None = None
@@ -500,9 +580,15 @@ class UpdaterApp(tk.Tk):
         self._dance_visited: bool                   = False
         self._border_rainbow_started: bool          = False
         self._dance_audio_start: float | None       = None
-        threading.Thread(target=_prefetch_dance_assets, daemon=True).start()
-
-        self.bind_all("<Key>", self._on_key_for_konami)
+        self._dance_stream_active:  list[bool]           = [False]
+        self._dance_display_active: list[bool]           = [False]
+        self._dance_frame_queue:    queue.Queue          = queue.Queue(maxsize=60)
+        self._dance_start_time:     list[float]          = [float("inf")]
+        self._dance_fps_ref:        list[float]          = [30.0]
+        self._dance_display_size:   list[tuple[int,int]] = [(640, 360)]
+        if _ENABLE_SECRET:
+            threading.Thread(target=_prefetch_dance_assets, daemon=True).start()
+            self.bind_all("<Key>", self._on_key_for_konami)
 
         if LOGO_URL:
             threading.Thread(target=self._prefetch_logo, daemon=True).start()
@@ -526,14 +612,22 @@ class UpdaterApp(tk.Tk):
             encoded = base64.b64encode(image_bytes).decode("ascii")
             def create_image() -> None:
                 try:
-                    image = tk.PhotoImage(data=encoded)
-                    height = image.height()
-                    if height > self._LOGO_TARGET_HEIGHT:
-                        factor = max(1, round(height / self._LOGO_TARGET_HEIGHT))
-                        image = image.subsample(factor)
-                    self._logo_image = image
+                    full_image = tk.PhotoImage(data=encoded)
+                    # Window / taskbar icon — keep close to original size, cap at 256px
+                    icon_image = full_image
+                    if icon_image.height() > 256:
+                        icon_factor = max(1, round(icon_image.height() / 64))
+                        icon_image = full_image.subsample(icon_factor)
+                    self._icon_image = icon_image
+                    self.iconphoto(True, icon_image)
+                    # Header image — ~32px tall
+                    header_image = full_image
+                    if full_image.height() > self._LOGO_TARGET_HEIGHT:
+                        factor = max(1, round(full_image.height() / self._LOGO_TARGET_HEIGHT))
+                        header_image = full_image.subsample(factor)
+                    self._logo_image = header_image
                     if self._header_logo_label is not None and self._header_title_label is not None:
-                        self._header_logo_label.config(image=image)
+                        self._header_logo_label.config(image=header_image)
                         self._header_logo_label.pack(
                             side="left", padx=(0, 8), before=self._header_title_label,
                         )
@@ -992,6 +1086,21 @@ class UpdaterApp(tk.Tk):
             )
             version_var = tk.StringVar(value=selected_label if options else "")
 
+            modloader_by_version: dict[str, str] = {
+                str(entry["version"]): _format_modloader(entry["modloader"])
+                for entry in self.versions_data.get("versions", [])
+                if entry.get("modloader")
+            }
+            modloader_var = tk.StringVar(
+                value=modloader_by_version.get(default_version, "")
+            )
+
+            def on_version_change(*_) -> None:
+                version_str = version_var.get().replace(" (latest)", "").strip()
+                modloader_var.set(modloader_by_version.get(version_str, ""))
+
+            version_var.trace_add("write", on_version_change)
+
             if options:
                 menu = tk.OptionMenu(version_row, version_var, *options)
                 menu.config(
@@ -1008,6 +1117,18 @@ class UpdaterApp(tk.Tk):
                 tk.Label(
                     version_row, text="No versions available",
                     font=FONT_BODY, bg=DARK_BG, fg=RED,
+                ).pack(side="left")
+
+            if modloader_by_version:
+                modloader_row = tk.Frame(body, bg=DARK_BG)
+                modloader_row.pack(fill="x", pady=(0, 8))
+                tk.Label(
+                    modloader_row, text="Modloader:", font=FONT_BODY,
+                    bg=DARK_BG, fg=TEXT, width=12, anchor="w",
+                ).pack(side="left")
+                tk.Label(
+                    modloader_row, textvariable=modloader_var,
+                    font=FONT_MONO, bg=DARK_BG, fg=TEXT_DIM,
                 ).pack(side="left")
 
             fresh_var = tk.BooleanVar(value=self.fresh_install or not self.local_version)
@@ -1064,7 +1185,8 @@ class UpdaterApp(tk.Tk):
                 version_str = str(entry["version"])
                 if version_str == str(self.target_version):
                     target_commit = entry["commit"]
-                    self.release_message = entry.get("message", "")
+                    self.release_message  = entry.get("message", "")
+                    self.target_modloader = entry.get("modloader", "")
                 if (not self.fresh_install
                         and self.local_version
                         and version_str == str(self.local_version)):
@@ -1478,10 +1600,6 @@ class UpdaterApp(tk.Tk):
             frame.bind("<Destroy>", on_destroy)
             step()
 
-        progress_var:  list[tk.StringVar | None] = [None]
-        progress_bar:  list[ttk.Progressbar | None] = [None]
-        bar_mode:      list[str] = ["indeterminate"]
-
         def build_loading() -> tk.Frame:
             frame = tk.Frame(self, bg=DARK_BG)
             add_header_with_question(frame)
@@ -1490,10 +1608,9 @@ class UpdaterApp(tk.Tk):
             body.pack(fill="both", expand=True)
             centre_panel = tk.Frame(body, bg=PANEL_BG)
             centre_panel.pack(fill="both", expand=True, padx=8, pady=8)
-            var = tk.StringVar(value="Getting ready...")
-            progress_var[0] = var
+            status_var = tk.StringVar(value=_DANCE_CURRENT_STATUS[0])
             tk.Label(
-                centre_panel, textvariable=var,
+                centre_panel, textvariable=status_var,
                 font=FONT_BODY, fg=TEXT, bg=PANEL_BG, justify="center",
             ).pack(expand=True, pady=(20, 8))
             bar = ttk.Progressbar(
@@ -1502,131 +1619,173 @@ class UpdaterApp(tk.Tk):
             )
             bar.pack(pady=(0, 24))
             bar.start(15)
-            progress_bar[0] = bar
+
+            def poll_status() -> None:
+                try:
+                    status_var.set(_DANCE_CURRENT_STATUS[0])
+                    frame.after(250, poll_status)
+                except tk.TclError:
+                    pass
+
+            frame.after(250, poll_status)
             return frame
-
-        self._swap_frame(build_loading, no_border=True)
-
-        def update_status(message: str) -> None:
-            if progress_var[0] is not None:
-                progress_var[0].set(message)
-
-        def update_progress(download_info: dict) -> None:
-            status = download_info.get("status")
-            if status == "finished":
-                self.after(0, lambda: update_status("Merging streams..."))
-                def to_indeterminate() -> None:
-                    bar = progress_bar[0]
-                    if bar is not None and bar_mode[0] == "determinate":
-                        bar.configure(mode="indeterminate")
-                        bar.start(15)
-                        bar_mode[0] = "indeterminate"
-                self.after(0, to_indeterminate)
-            elif status == "downloading":
-                downloaded = download_info.get("downloaded_bytes", 0)
-                total = download_info.get("total_bytes") or download_info.get("total_bytes_estimate", 0)
-                if total:
-                    pct = int(downloaded / total * 100)
-                    self.after(0, lambda p=pct: update_status(f"Downloading video... {p}%"))
-                    def to_determinate(p: int) -> None:
-                        bar = progress_bar[0]
-                        if bar is not None:
-                            if bar_mode[0] == "indeterminate":
-                                bar.stop()
-                                bar.configure(mode="determinate")
-                                bar_mode[0] = "determinate"
-                            bar.configure(value=p)
-                    self.after(0, lambda p=pct: to_determinate(p))
 
         def on_download_done(video_path: Path, audio_path: Path) -> None:
             def build_player() -> tk.Frame:
-                import winsound
-                moviepy_editor = importlib.import_module("moviepy")
-                pil_image      = importlib.import_module("PIL.Image")
-                pil_imagetk    = importlib.import_module("PIL.ImageTk")
+                imageio_mod = importlib.import_module("imageio")
+                pil_image   = importlib.import_module("PIL.Image")
+                pil_imagetk = importlib.import_module("PIL.ImageTk")
 
-                video    = moviepy_editor.VideoFileClip(str(video_path))
-                fps      = video.fps
-                duration = video.duration
+                self._dance_display_active[0] = True
 
                 frame = tk.Frame(self, bg=DARK_BG)
                 add_header_with_question(frame)
                 add_back_button(frame)
 
-                body = tk.Frame(frame, bg=DARK_BG)
+                body = tk.Frame(frame, bg="black")
                 body.pack(fill="both", expand=True)
                 display = tk.Label(body, bg="black")
                 display.pack(fill="both", expand=True, padx=8, pady=8)
                 if _ENABLE_RAINBOW:
                     start_rainbow_flash(frame, body)
 
-                playing:      list[bool]            = [True]
-                photo_ref:    list[object]          = [None]
-                display_size: list[tuple[int, int]] = [(640, 360)]
-                frame_queue:  queue.Queue           = queue.Queue(maxsize=4)
+                photo_ref:     list[object]       = [None]
+                pending_frame: list[tuple | None] = [None]
 
                 def on_display_configure(event: tk.Event) -> None:
                     if event.widget is display:
-                        display_size[0] = (max(event.width, 1), max(event.height, 1))
+                        self._dance_display_size[0] = (max(event.width, 1), max(event.height, 1))
 
                 display.bind("<Configure>", on_display_configure)
 
-                audio_still_playing = (
-                    self._dance_audio_start is not None
-                    and time.monotonic() - self._dance_audio_start < duration
-                )
-                if audio_still_playing:
-                    start_time: list[float] = [self._dance_audio_start]  # type: ignore[list-item]
-                else:
-                    self._dance_audio_start = time.monotonic()
-                    start_time = [self._dance_audio_start]
-                    winsound.PlaySound(str(audio_path), winsound.SND_FILENAME | winsound.SND_ASYNC)
-
-                def decode_worker() -> None:
-                    while playing[0]:
-                        elapsed = time.monotonic() - start_time[0]
-                        if elapsed >= duration:
-                            break
-                        try:
-                            img_array = video.get_frame(elapsed)
-                            width, height = display_size[0]
-                            img = pil_image.fromarray(img_array)
-                            img.thumbnail((width, height), pil_image.BILINEAR)
-                            frame_queue.put(img, timeout=0.05)
-                        except Exception:
-                            break
-                        next_frame_time = start_time[0] + (int(elapsed * fps) + 1) / fps
-                        sleep_duration = next_frame_time - time.monotonic()
-                        if sleep_duration > 0:
-                            time.sleep(sleep_duration)
+                def open_and_stream() -> None:
+                    reader = None
                     try:
-                        video.close()
+                        fps      = _DANCE_CACHED_FPS[0] if _DANCE_CACHED_FPS[0] > 0 else 0.0
+                        duration = _DANCE_CACHED_DURATION[0]
+
+                        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                            reader = imageio_mod.get_reader(str(video_path), "ffmpeg")
+                        if fps == 0.0:
+                            meta     = reader.get_meta_data()
+                            fps_raw  = meta.get("fps") or meta.get("source_fps")
+                            fps      = float(fps_raw) if fps_raw and float(fps_raw) > 0 else 30.0
+                            duration = float(meta.get("duration") or 0)
+                            _DANCE_CACHED_FPS[0]      = fps
+                            _DANCE_CACHED_DURATION[0] = duration
+                        self._dance_fps_ref[0] = fps
+
+                        def audio_starter() -> None:
+                            try:
+                                if not _DANCE_WARMUP_WAV.exists():
+                                    _generate_silent_wav(_DANCE_WARMUP_WAV)
+                                winsound.PlaySound(
+                                    str(_DANCE_WARMUP_WAV),
+                                    winsound.SND_FILENAME | winsound.SND_SYNC,
+                                )
+                            except Exception:
+                                pass
+                            winsound.PlaySound(str(audio_path), winsound.SND_FILENAME | winsound.SND_ASYNC)
+                            actual_start = time.monotonic()
+                            self._dance_audio_start = actual_start
+                            self._dance_start_time[0] = actual_start
+
+                        threading.Thread(target=audio_starter, daemon=True).start()
+
+                        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                            for frame_index, img_array in enumerate(reader):
+                                if not self._dance_stream_active[0]:
+                                    break
+                                disp_w, disp_h = self._dance_display_size[0]
+                                img = pil_image.fromarray(img_array)
+                                src_w, src_h = img.size
+                                ratio = min(disp_w / src_w, disp_h / src_h)
+                                img = img.resize(
+                                    (max(1, int(src_w * ratio)), max(1, int(src_h * ratio))),
+                                    pil_image.BILINEAR,
+                                )
+                                while self._dance_stream_active[0]:
+                                    try:
+                                        self._dance_frame_queue.put_nowait((img, frame_index))
+                                        break
+                                    except queue.Full:
+                                        if not self._dance_display_active[0]:
+                                            # Not displaying: drain one frame to keep reader
+                                            # advancing at real-time pace rather than blocking.
+                                            try:
+                                                self._dance_frame_queue.get_nowait()
+                                            except queue.Empty:
+                                                pass
+                                            time.sleep(1.0 / fps)
+                                        else:
+                                            time.sleep(0.005)
                     except Exception:
                         pass
+                    finally:
+                        self._dance_stream_active[0] = False
+                        if reader is not None:
+                            try:
+                                reader.close()
+                            except Exception:
+                                pass
 
-                threading.Thread(target=decode_worker, daemon=True).start()
+                if not self._dance_stream_active[0]:
+                    # Fresh start: clear any stale queue state from a previous session.
+                    self._dance_stream_active[0] = True
+                    self._dance_start_time[0] = float("inf")
+                    while not self._dance_frame_queue.empty():
+                        try:
+                            self._dance_frame_queue.get_nowait()
+                        except queue.Empty:
+                            break
+                    threading.Thread(target=open_and_stream, daemon=True).start()
+                # If stream is already active, show_frame below will pick up from the
+                # live queue immediately — no FFmpeg restart needed.
 
                 def show_frame() -> None:
-                    if not playing[0]:
+                    if not self._dance_display_active[0]:
                         return
-                    try:
-                        img = frame_queue.get_nowait()
-                        photo_ref[0] = pil_imagetk.PhotoImage(img)
-                        display.configure(image=photo_ref[0])
-                    except queue.Empty:
-                        pass
-                    self.after(16, show_frame)
+                    if self._dance_start_time[0] < float("inf"):
+                        fps = self._dance_fps_ref[0]
+                        now = time.monotonic()
+                        while True:
+                            if pending_frame[0] is None:
+                                try:
+                                    pending_frame[0] = self._dance_frame_queue.get_nowait()
+                                except queue.Empty:
+                                    break
+                            img, frame_index = pending_frame[0]
+                            target_time = self._dance_start_time[0] + (frame_index + 1) / fps
+                            if now < target_time:
+                                break  # frame is on time; wait for it
+                            # Frame is past due. Peek at the next frame to decide whether
+                            # to display this one or skip it as stale.
+                            try:
+                                next_frame = self._dance_frame_queue.get_nowait()
+                                next_target = self._dance_start_time[0] + (next_frame[1] + 1) / fps
+                                if now >= next_target:
+                                    # Next frame is also past due: skip current, loop again.
+                                    pending_frame[0] = next_frame
+                                else:
+                                    # Next frame is in the future: current is the right one.
+                                    photo_ref[0] = pil_imagetk.PhotoImage(img)
+                                    display.configure(image=photo_ref[0])
+                                    pending_frame[0] = next_frame
+                                    break
+                            except queue.Empty:
+                                # No next frame: display current (most recent available).
+                                photo_ref[0] = pil_imagetk.PhotoImage(img)
+                                display.configure(image=photo_ref[0])
+                                pending_frame[0] = None
+                                break
+                    self.after(4, show_frame)
 
                 def on_destroy(event: tk.Event) -> None:
                     if event.widget is frame:
-                        playing[0] = False
-                        try:
-                            video.close()
-                        except Exception:
-                            pass
+                        self._dance_display_active[0] = False
 
                 frame.bind("<Destroy>", on_destroy)
-                self.after(50, show_frame)
+                self.after(4, show_frame)
                 return frame
 
             self._swap_frame(build_player, no_border=True)
@@ -1651,75 +1810,30 @@ class UpdaterApp(tk.Tk):
 
             self._swap_frame(build_error, no_border=True)
 
-        def download_worker() -> None:
-            global _yt_dlp, _HAS_MOVIEPY
-            try:
-                # Exe build: use bundled assets only; never fall back to appdata download
-                if hasattr(sys, "_MEIPASS"):
-                    bundled_video = _bundled_dance_path("dance_video.mp4")
-                    bundled_audio = _bundled_dance_path("dance_audio.wav")
-                    if bundled_video and bundled_audio:
-                        self.after(0, lambda: on_download_done(bundled_video, bundled_audio))
-                    else:
-                        raise RuntimeError("Dance assets were not bundled into this exe.")
-                    return
+        def proceed() -> None:
+            if _DANCE_ASSETS_ERROR[0] is not None:
+                on_dance_error(_DANCE_ASSETS_ERROR[0])
+                return
+            if hasattr(sys, "_MEIPASS"):
+                bundled_video = _bundled_dance_path("dance_video.mp4")
+                bundled_audio = _bundled_dance_path("dance_audio.wav")
+                if bundled_video and bundled_audio:
+                    on_download_done(bundled_video, bundled_audio)
+                else:
+                    on_dance_error("Dance assets were not bundled into this exe.")
+            else:
+                on_download_done(_DANCE_VIDEO_FILE, _DANCE_AUDIO_FILE)
 
-                # Step 1: install any missing dependencies
-                to_install = []
-                if _yt_dlp is None:
-                    to_install.append("yt-dlp")
-                if not _HAS_MOVIEPY:
-                    to_install.extend(["moviepy", "Pillow", "imageio-ffmpeg"])
-                if to_install:
-                    label = ", ".join(to_install)
-                    self.after(0, lambda lb=label: update_status(f"Installing {lb}..."))
-                    result = subprocess.run(
-                        [sys.executable, "-m", "pip", "install", *to_install],
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.STDOUT,
-                        text=True,
-                    )
-                    if result.returncode != 0:
-                        raise RuntimeError(result.stdout[-600:])
-                    if _yt_dlp is None:
-                        _yt_dlp = importlib.import_module("yt_dlp")  # type: ignore[assignment]
-                    _HAS_MOVIEPY = True
+        if _DANCE_ASSETS_READY.is_set():
+            proceed()
+        else:
+            self._swap_frame(build_loading, no_border=True)
 
-                # Step 2: download video if not already cached
-                self.after(0, lambda: update_status("Downloading video..."))
-                cache_file = _DANCE_CACHE_FILE
-                cache_file.parent.mkdir(parents=True, exist_ok=True)
-                _invalidate_dance_cache_if_url_changed()
-                if not cache_file.exists():
-                    ydl_opts = {
-                        "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/mp4/best",
-                        "outtmpl": str(cache_file),
-                        "merge_output_format": "mp4",
-                        "quiet": True,
-                        "no_warnings": True,
-                        "progress_hooks": [update_progress],
-                    }
-                    with _yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore[union-attr]
-                        ydl.download([_DANCE_VIDEO_URL])
-                if not cache_file.exists():
-                    raise FileNotFoundError("File not found after download completed.")
-                _DANCE_URL_FILE.write_text(_DANCE_VIDEO_URL, encoding="utf-8")
+            def wait_for_assets() -> None:
+                _DANCE_ASSETS_READY.wait()
+                self.after(0, proceed)
 
-                # Step 3: extract audio to WAV if not already cached
-                audio_file = _DANCE_AUDIO_FILE
-                if not audio_file.exists():
-                    self.after(0, lambda: update_status("Preparing audio..."))
-                    with _DANCE_AUDIO_LOCK:
-                        moviepy_editor = importlib.import_module("moviepy")
-                        clip = moviepy_editor.VideoFileClip(str(cache_file))
-                        clip.audio.write_audiofile(str(audio_file), logger=None)
-                        clip.close()
-
-                self.after(0, lambda: on_download_done(cache_file, audio_file))
-            except Exception as exc:
-                self.after(0, lambda error=str(exc): on_dance_error(error))
-
-        threading.Thread(target=download_worker, daemon=True).start()
+            threading.Thread(target=wait_for_assets, daemon=True).start()
 
 
 # -------------------------

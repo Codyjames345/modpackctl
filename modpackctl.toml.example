@@ -12,6 +12,9 @@ modpack_name = "<YourModpackName>"
 # URL to a logo image shown in the updater header (optional; PNG or GIF, ~32px tall)
 # logo_url = "https://example.com/logo.png"
 
+# Whether to include the Konami code easter egg (optional; default: true)
+# enable_secret = false
+
 # YouTube URL for the secret easter egg video (optional; defaults to Never Gonna Give You Up)
 # secret_video_url = "https://www.youtube.com/watch?v=..."
 

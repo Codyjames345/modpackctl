@@ -14,7 +14,7 @@ try:
     import tomllib          # stdlib from Python 3.11+
 except ModuleNotFoundError:
     try:
-        import tomli as tomllib  # type: ignore[no-redef]
+        import tomli as tomllib  # type: ignore[import]
     except ModuleNotFoundError:
         print("[ERROR] Python 3.11+ is required, or install tomli: pip install tomli")
         sys.exit(1)
@@ -74,6 +74,9 @@ modpack_name = "<YourModpackName>"
 
 # URL to a logo image shown in the updater header (optional; PNG or GIF, ~32px tall)
 # logo_url = "https://example.com/logo.png"
+
+# Whether to include the Konami code easter egg (optional; default: true)
+# enable_secret = false
 
 # YouTube URL for the secret easter egg video (optional; defaults to Never Gonna Give You Up)
 # secret_video_url = "https://www.youtube.com/watch?v=..."
@@ -1206,6 +1209,8 @@ def _build_versions_json() -> dict:
         version_entry: dict = {"version": entry["version"], "commit": entry["commit"], "time": entry["time"]}
         if entry.get("message"):
             version_entry["message"] = entry["message"]
+        if entry.get("modloader"):
+            version_entry["modloader"] = entry["modloader"]
         versions.append(version_entry)
     return {"latest": log[-1]["version"] if log else None, "versions": versions}
 
@@ -1405,7 +1410,7 @@ def _prepare_icon() -> Path | None:
     if not logo_url:
         return None
     try:
-        from PIL import Image
+        from PIL import Image  # type: ignore[import]
         ico_path = Path(".pyinstaller") / "icon.ico"
         ico_path.parent.mkdir(parents=True, exist_ok=True)
         with urllib.request.urlopen(logo_url, timeout=10) as response:
@@ -1440,12 +1445,11 @@ def _prepare_dance_assets() -> tuple[Path, Path] | None:
     try:
         import yt_dlp as ydl_module
     except ImportError:
-        print("[WARN] yt-dlp not installed — dance video will not be bundled (players will download at runtime).")
+        print("[WARN] yt-dlp not installed — dance assets will not be bundled (players will download at runtime).")
         return None
 
     cached_url = url_record.read_text(encoding="utf-8").strip() if url_record.exists() else ""
-    url_changed = cached_url != dance_url
-    if url_changed and video_path.exists():
+    if cached_url != dance_url and video_path.exists():
         video_path.unlink()
         if audio_path.exists():
             audio_path.unlink()
@@ -1453,7 +1457,7 @@ def _prepare_dance_assets() -> tuple[Path, Path] | None:
     if not video_path.exists():
         print("Downloading dance video for bundling...")
         ydl_opts = {
-            "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/mp4/best",
+            "format": "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=480]+bestaudio/best[height<=480]/mp4/best",
             "outtmpl": str(video_path),
             "merge_output_format": "mp4",
             "noplaylist": True,
@@ -1471,12 +1475,14 @@ def _prepare_dance_assets() -> tuple[Path, Path] | None:
     if not audio_path.exists():
         print("Extracting dance audio for bundling...")
         try:
-            import moviepy
-            clip = moviepy.VideoFileClip(str(video_path))
-            if clip.audio is None:
-                raise RuntimeError("Video has no audio track.")
-            clip.audio.write_audiofile(str(audio_path), logger=None)
-            clip.close()
+            import imageio_ffmpeg  # type: ignore[import-untyped]
+            ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+            subprocess.run(
+                [ffmpeg_exe, "-i", str(video_path),
+                 "-vn", "-acodec", "pcm_s16le", "-ar", "44100", "-ac", "2",
+                 str(audio_path), "-y"],
+                check=True, capture_output=True,
+            )
         except Exception as exc:
             print(f"[WARN] Could not extract dance audio — not bundling: {exc}")
             return None
@@ -1495,7 +1501,9 @@ def _build_exe(source_py: Path) -> Path | None:
     print(f"Building {exe_path.name}...")
     icon_path   = _prepare_icon()
     icon_args   = ["--icon", str(icon_path.resolve())] if icon_path else []
-    dance_paths = _prepare_dance_assets()
+    cfg         = load_config()
+    enable_secret = cfg.get("settings", {}).get("enable_secret", True)
+    dance_paths = _prepare_dance_assets() if enable_secret else None
     dance_args: list[str] = []
     if dance_paths:
         video_file, audio_file = dance_paths
@@ -1512,7 +1520,6 @@ def _build_exe(source_py: Path) -> Path | None:
                 *icon_args,
                 *dance_args,
                 "--collect-all", "yt_dlp",
-                "--collect-all", "moviepy",
                 "--collect-all", "imageio",
                 "--collect-all", "imageio_ffmpeg",
                 "--collect-all", "PIL",
@@ -1525,11 +1532,11 @@ def _build_exe(source_py: Path) -> Path | None:
         )
     except FileNotFoundError:
         print("[WARN] PyInstaller not found — exe not built.")
-        print("       Install build deps: pip install pyinstaller yt-dlp moviepy Pillow imageio-ffmpeg")
+        print("       Install build deps: pip install pyinstaller yt-dlp imageio-ffmpeg Pillow")
         return None
     except subprocess.CalledProcessError:
         print("[WARN] PyInstaller build failed — exe not built.")
-        print("       Install build deps: pip install pyinstaller yt-dlp moviepy Pillow imageio-ffmpeg")
+        print("       Install build deps: pip install pyinstaller yt-dlp imageio-ffmpeg Pillow")
         return None
     if not exe_path.exists():
         print("[WARN] PyInstaller finished but exe was not produced.")
@@ -1697,13 +1704,15 @@ def bake_updater() -> bool:
     modpack_name      = settings.get("modpack_name", "")
     logo_url          = settings.get("logo_url", "")
     secret_video_url  = settings.get("secret_video_url", _DANCE_DEFAULT_URL)
-    enable_rainbow    = settings.get("enable_rainbow", False)
+    enable_secret     = settings.get("enable_secret",  True)
+    enable_rainbow    = settings.get("enable_rainbow",  False)
     content = UPDATE_SCRIPT.read_text(encoding="utf-8")
     content = content.replace('"__GITHUB_USER__"',      f'"{user}"')
     content = content.replace('"__GITHUB_REPO__"',      f'"{repo}"')
     content = content.replace('"__MODPACK_NAME__"',     f'"{modpack_name}"')
     content = content.replace('"__LOGO_URL__"',         f'"{logo_url}"')
     content = content.replace('"__SECRET_VIDEO_URL__"', f'"{secret_video_url}"')
+    content = content.replace('"__ENABLE_SECRET__"',    str(bool(enable_secret)))
     content = content.replace('"__ENABLE_RAINBOW__"',   str(bool(enable_rainbow)))
     dest_path = _baked_updater_path()
     dest_path.parent.mkdir(parents=True, exist_ok=True)

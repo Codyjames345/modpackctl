@@ -6,7 +6,7 @@ A lightweight CLI for managing a CurseForge modpack across versions, with git-ba
 
 `modpackctl.py` is the pack maintainer's tool. It tracks mod versions by importing CurseForge export zips, generates changelogs, builds client and server release zips, and publishes them to GitHub with a single command.
 
-`client-updater.py` ships alongside the release zip. Players double-click it to check for updates and apply them without re-downloading the entire modpack.
+`{file_prefix}-updater.py` (and its compiled `.exe`) ships alongside the release zip. Players double-click it to check for updates and apply them without re-downloading the entire modpack.
 
 ## Prerequisites
 
@@ -32,6 +32,15 @@ modpack_name = "YourModpackName"
 
 # URL to a logo image shown in the updater header (optional; PNG or GIF, ~32px tall)
 # logo_url = "https://example.com/logo.png"
+
+# Whether to include the Konami code easter egg (optional; default: true)
+# enable_secret = true
+
+# YouTube URL for the secret easter egg video (optional; defaults to Never Gonna Give You Up)
+# secret_video_url = "https://www.youtube.com/watch?v=..."
+
+# Whether to show the rainbow effect in the easter egg (optional; default: false)
+# enable_rainbow = true
 
 # CurseForge project IDs to exclude from client releases
 server_only = [123456, 789012]
@@ -76,13 +85,13 @@ python modpackctl.py publish 1.2.0 --message "Improved performance and fixed cra
 | `log` | List all committed versions with diff stats. |
 | `changelog <v1> [output.md] [--client\|--server]` | Generate a changelog for `v1` as an initial release. |
 | `changelog <v1> <v2> [output.md] [--client\|--server]` | Generate a changelog between two versions. `--client` excludes server-only mods; `--server` excludes client-only mods, shaderpacks, and resourcepacks. |
-| `release <version> [--client\|--server]` | Build a release zip. `--client` also bakes `releases/client-updater.py` and builds `releases/client-updater.exe` (if PyInstaller is available). Without a flag, includes all mods. |
+| `release <version> [--client\|--server]` | Build a release zip. `--client` also bakes `releases/{file_prefix}-updater.py` and builds `releases/{file_prefix}-updater.exe` (if PyInstaller is available). Without a flag, includes all mods. |
 | `publish <version> [--message "..."]` | Build a client release, create a GitHub Release with client-filtered changelog notes, and push `versions.json` and `snapshots/` to `gh-pages`. Uploads the zip, baked `.py`, and `.exe` (if built). `--message` overrides the message set at `commit` time. |
 | `update <version> [--client\|--server]` | Rebuild the `build/` folder for a version without zipping. |
 | `purge [--all]` | Remove stale files from the download cache. Without `--all`, only removes mods not in the latest snapshot. |
 | `build-pages` | Write `versions.json` and `snapshots/` to a local `gh-pages/` folder. Useful for manually pushing to `gh-pages` if `publish` fails. |
-| `bake-updater` | Write a pre-configured `releases/client-updater.py` using credentials from `modpackctl.toml`, without building a full release. |
-| `build-exe` | Build `releases/client-updater.exe` from the baked `releases/client-updater.py` using PyInstaller. Requires `pip install pyinstaller yt-dlp moviepy Pillow imageio-ffmpeg`. Also runs automatically as part of `release --client`. |
+| `bake-updater` | Write a pre-configured `releases/{file_prefix}-updater.py` using credentials from `modpackctl.toml`, without building a full release. |
+| `build-exe` | Build `releases/{file_prefix}-updater.exe` from the baked updater script using PyInstaller. When `enable_secret` is true, also downloads and bundles the easter egg video and audio. Requires `pip install pyinstaller yt-dlp imageio-ffmpeg Pillow`. Also runs automatically as part of `release --client`. |
 | `export-example` | Write the built-in config template to `modpackctl.toml.example`. |
 
 ## Version Bumping
@@ -120,7 +129,7 @@ The flow:
 
 A **⚙ gear button** in the header opens the colour settings dialog, where players can customise all UI colours with a colour picker. Settings are saved to prefs and persist between runs.
 
-**Generating the updater:** Running `release --client` (or `publish`) reads your `modpackctl.toml` and substitutes placeholders in `client-updater-template.py`, writing the result to `releases/client-updater.py`. It then attempts to build `releases/client-updater.exe` via PyInstaller. Both files are pre-configured for your repo and require no setup on the player's end.
+**Generating the updater:** Running `release --client` (or `publish`) reads your `modpackctl.toml` and substitutes placeholders in `client-updater-template.py`, writing the result to `releases/{file_prefix}-updater.py`. It then attempts to build `releases/{file_prefix}-updater.exe` via PyInstaller. Both files are pre-configured for your repo and require no setup on the player's end.
 
 Use these placeholders as plain string literals anywhere in `client-updater-template.py`:
 
@@ -130,21 +139,24 @@ Use these placeholders as plain string literals anywhere in `client-updater-temp
 | `"__GITHUB_REPO__"` | `github.repo` from `modpackctl.toml` |
 | `"__MODPACK_NAME__"` | `settings.modpack_name` from `modpackctl.toml` |
 | `"__LOGO_URL__"` | `settings.logo_url`, or an empty string if not set |
+| `"__ENABLE_SECRET__"` | `settings.enable_secret` as `True` or `False` (default: `True`) |
+| `"__SECRET_VIDEO_URL__"` | `settings.secret_video_url`, or the default Never Gonna Give You Up URL |
+| `"__ENABLE_RAINBOW__"` | `settings.enable_rainbow` as `True` or `False` (default: `False`) |
 
-Run `bake-updater` to produce `releases/client-updater.py` from the template without building a full release, or `build-exe` to compile the `.exe` from an already-baked `releases/client-updater.py`.
+Run `bake-updater` to produce `releases/{file_prefix}-updater.py` from the template without building a full release, or `build-exe` to compile the `.exe` from an already-baked script.
 
-To enable exe building, install the build dependencies once: `pip install pyinstaller yt-dlp moviepy Pillow imageio-ffmpeg`
+To enable exe building, install the build dependencies once: `pip install pyinstaller yt-dlp imageio-ffmpeg Pillow`
 
-**Distribution:** `publish` uploads up to three assets to the GitHub Release: the modpack zip, `client-updater.py`, and `client-updater.exe` (if the PyInstaller build succeeded). `publish` also pushes enriched snapshots (with mod names) to the `gh-pages` branch so the changelog displays real names like "Sodium" instead of project IDs.
+**Distribution:** `publish` uploads up to three assets to the GitHub Release: the modpack zip, `{file_prefix}-updater.py`, and `{file_prefix}-updater.exe` (if the PyInstaller build succeeded). `publish` also pushes enriched snapshots (with mod names) to the `gh-pages` branch so the changelog displays real names like "Sodium" instead of project IDs.
 
-- **New players** — download and extract the modpack zip, then download either `client-updater.exe` (no Python needed) or `client-updater.py` (requires Python 3.8+). Save it anywhere — Desktop, Downloads, etc.
+- **New players** — download and extract the modpack zip, then download either `{file_prefix}-updater.exe` (no Python needed) or `{file_prefix}-updater.py` (requires Python 3.8+). Save it anywhere — Desktop, Downloads, etc.
 - **Existing players** — re-run their saved updater; the prefs file remembers the modpack folder.
 
 **Player prefs:** the last-selected modpack folder is saved to `~/.modpack-updater/` (namespaced per modpack).
 
-**Requirements for players (`.py` version):** Python 3.8+ and an internet connection. The updater itself uses only the standard library. A hidden easter egg installs additional packages automatically via pip in the background the first time the updater is run (`yt-dlp`, `moviepy`, `Pillow`, `imageio-ffmpeg`); players do not need to install anything manually.
+**Requirements for players (`.py` version):** Python 3.8+ and an internet connection. The updater itself uses only the standard library. When the easter egg is triggered for the first time, additional packages are installed automatically via pip in the background (`yt-dlp`, `Pillow`, `imageio`, `imageio-ffmpeg`) and the video is downloaded and cached in `~/.modpack-updater/`; players do not need to install anything manually.
 
-**Requirements for players (`.exe` version):** An internet connection only — no Python installation needed.
+**Requirements for players (`.exe` version):** An internet connection is required to check for modpack updates — no Python installation needed. The easter egg video (when enabled) is bundled directly in the exe and works offline.
 
 ## Repository Layout
 
@@ -158,7 +170,7 @@ To enable exe building, install the build dependencies once: `pip install pyinst
   dl_cache/         — persistent jar store (avoids re-downloading on rebuild)
 .pyinstaller/       — PyInstaller build cache (not committed)
 build/              — current working build (mods/, shaderpacks/, resourcepacks/)
-releases/           — output zips, client-updater.py, and client-updater.exe
+releases/           — output zips, {file_prefix}-updater.py, and {file_prefix}-updater.exe
 modpackctl.toml     — your config (not committed)
 ```
 
@@ -169,6 +181,6 @@ modpackctl.toml     — your config (not committed)
 - `versions.json` — lists every released version and its commit hash
 - `snapshots/{commit}.json` — an enriched mod list for each version (mod names, filenames, categories)
 
-`client-updater.py` fetches `versions.json` to find the latest version, then fetches the two relevant snapshots to compute what changed since the player's current version.
+The updater fetches `versions.json` to find the latest version, then fetches the two relevant snapshots to compute what changed since the player's current version.
 
 The branch is created automatically as an orphan on first publish.
