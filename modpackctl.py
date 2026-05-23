@@ -781,9 +781,10 @@ def commit(source: str, major: bool = False, message: str = "") -> tuple[str, st
 
     log = load_log()
 
-    if log and log[-1]["commit"] == commit_id:
-        print("[INFO] No changes detected — nothing to commit.")
-        return None
+    for existing_entry in log:
+        if existing_entry["commit"] == commit_id:
+            print(f"[INFO] This zip matches an already-committed version ({existing_entry['version']}) — nothing to commit.")
+            return None
 
     old_snapshot  = load_snapshot(log[-1]["commit"]) if log else {}
     old_version   = log[-1]["version"] if log else ""
