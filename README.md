@@ -27,9 +27,10 @@ Tab-completion for subcommands and flags is available via [argcomplete](https://
 
    **PowerShell (Windows):**
    ```powershell
+   New-Item -ItemType File -Path $PROFILE -Force
    Register-Python-Argcomplete --shell powershell modpackctl.py | Out-File $PROFILE -Append
    ```
-   Then restart your terminal or run `. $PROFILE`.
+   Then restart your terminal or run `. $PROFILE`. The first line creates the profile file if it doesn't exist yet and is safe to run even if it already does.
 
    **Bash (Linux/macOS):**
    ```bash
