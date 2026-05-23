@@ -1960,8 +1960,9 @@ def publish(version: str, message: str = "") -> None:
         print(f"  Release URL : {release_url}")
     print(f"  gh-pages    : {pages_url}")
     print(f"{'=' * 42}\n")
-    print("     New players: download the zip from the release page.")
-    print("     Existing players: run client-updater.py from their current install.")
+    file_prefix = get_file_prefix()
+    print(f"  New players    : download {file_prefix}-{version}-client.zip (or -curseforge.zip) from the release page.")
+    print(f"  Existing players: run {file_prefix}-client-updater.py (or .exe) from their current install.")
 
 
 def build_pages() -> None:
