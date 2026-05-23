@@ -49,8 +49,8 @@ README           = Path("README.md")
 PYINSTALLER      = Path(".pyinstaller")
 PAGES_OUTPUT     = Path("gh-pages")
 CONFIG_EXAMPLE   = Path("modpackctl.example.toml")
-CLIENT_UPDATE_SCRIPT = Path("client-updater.example.py")   # client updater source template
-SERVER_UPDATE_SCRIPT = Path("server-updater.example.py")   # server updater source template
+CLIENT_UPDATE_SCRIPT = Path("client-updater.py")   # working copy; customise for this modpack
+SERVER_UPDATE_SCRIPT = Path("server-updater.py")   # working copy; customise for this modpack
 _DANCE_DEFAULT_URL  = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
 
 _GITIGNORE_ENTRIES  = [
@@ -194,8 +194,7 @@ def _init_working_dir() -> None:
     else:
         CONFIG_FILE.write_text(DEFAULT_CONFIG, encoding="utf-8")
         print(f"[OK] Created {CONFIG_FILE} with defaults.")
-    _ensure_template(CLIENT_UPDATE_SCRIPT)
-    _ensure_template(SERVER_UPDATE_SCRIPT)
+    _ensure_files(CLIENT_UPDATE_SCRIPT, SERVER_UPDATE_SCRIPT)
     _init_git_repo()
     print(f"\nWorking directory initialized. Edit {CONFIG_FILE} then re-run your command.")
     sys.exit(0)
@@ -1977,14 +1976,19 @@ def build_pages() -> None:
     print("     Push the contents of this folder to your gh-pages branch.")
 
 
-def _ensure_template(template_path: Path) -> None:
-    """Copy a bundled template to the CWD if it does not already exist there."""
-    if template_path.exists():
-        print(f"[INFO] Using existing {template_path.name}")
-    else:
-        source = _HERE / template_path.name
-        shutil.copy2(source, template_path)
-        print(f"[INFO] Copied {template_path.name} to current directory — you can customise it for this modpack.")
+def _ensure_files(*targets: Path) -> None:
+    """
+    For each target, copy the bundled name.example.ext to the CWD as name.ext if the
+    working copy does not already exist. Works for updater scripts and the toml config.
+    """
+    for target in targets:
+        if target.exists():
+            print(f"[INFO] Using existing {target.name}")
+        else:
+            example_name = f"{target.stem}.example{target.suffix}"
+            source = _HERE / example_name
+            shutil.copy2(source, target)
+            print(f"[INFO] Copied {example_name} → {target.name} — you can customise it for this modpack.")
 
 
 def reset_file(server: bool = False, config: bool = False) -> None:
@@ -2000,16 +2004,19 @@ def reset_file(server: bool = False, config: bool = False) -> None:
         shutil.copy2(src, CONFIG_FILE)
         print(f"[OK] {CONFIG_FILE} reset from {CONFIG_EXAMPLE.name}.")
     else:
-        target = SERVER_UPDATE_SCRIPT if server else CLIENT_UPDATE_SCRIPT
+        target      = SERVER_UPDATE_SCRIPT if server else CLIENT_UPDATE_SCRIPT
+        example_name = f"{target.stem}.example{target.suffix}"
         if not target.exists():
-            print(f"[INFO] {target} does not exist — nothing to remove.")
+            print(f"[INFO] {target.name} does not exist — nothing to remove.")
             return
-        answer = input(f"Delete {target} from the current directory? [y/N] ").strip().lower()
+        answer = input(f"Delete {target.name} and replace with {example_name}? [y/N] ").strip().lower()
         if answer not in ("y", "yes"):
             print("[INFO] Aborted.")
             sys.exit(0)
         target.unlink()
-        print(f"[OK] Deleted {target}.")
+        src = _HERE / example_name
+        shutil.copy2(src, target)
+        print(f"[OK] Reset {target.name} from {example_name}.")
 
 
 def bake_client_updater() -> bool:
@@ -2025,7 +2032,7 @@ def bake_client_updater() -> bool:
       __SECRET_VIDEO_URL__ — easter egg video URL (defaults to Never Gonna Give You Up)
       __ENABLE_RAINBOW__   — True/False; settings.enable_rainbow from modpackctl.toml (default: True)
     """
-    _ensure_template(CLIENT_UPDATE_SCRIPT)
+    _ensure_files(CLIENT_UPDATE_SCRIPT)
     if not CLIENT_UPDATE_SCRIPT.exists():
         print(f"[WARN] {CLIENT_UPDATE_SCRIPT} not found — skipping updater bake.")
         return False
@@ -2062,7 +2069,7 @@ def bake_server_updater() -> bool:
       __GITHUB_REPO__  — GitHub repo name from modpackctl.toml
       __MODPACK_NAME__ — settings.modpack_name from modpackctl.toml
     """
-    _ensure_template(SERVER_UPDATE_SCRIPT)
+    _ensure_files(SERVER_UPDATE_SCRIPT)
     if not SERVER_UPDATE_SCRIPT.exists():
         print(f"[WARN] {SERVER_UPDATE_SCRIPT} not found — skipping server updater bake.")
         return False
