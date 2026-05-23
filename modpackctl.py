@@ -1,4 +1,5 @@
 import argparse
+import tempfile
 try:
     import argcomplete
 except ModuleNotFoundError:
@@ -32,6 +33,8 @@ _JsonT = TypeVar("_JsonT", list, dict)
 # STORAGE
 # -------------------------
 
+_HERE           = Path(__file__).parent      # directory containing modpackctl.py
+
 REPO            = Path(".modpackctl")
 SNAPSHOTS       = REPO / "snapshots"
 LOG_FILE        = REPO / "log.json"
@@ -40,8 +43,12 @@ DL_CACHE        = REPO / "dl_cache"          # permanent jar store keyed by (pro
 OVERRIDES_STORE = REPO / "overrides"
 CONFIG_FILE     = Path("modpackctl.toml")
 
-BUILD         = Path("build")
-RELEASES      = Path("releases")
+BUILD            = Path("build")
+RELEASES         = Path("releases")
+README           = Path("README.md")
+PYINSTALLER      = Path(".pyinstaller")
+PAGES_OUTPUT     = Path("gh-pages")
+CONFIG_EXAMPLE   = Path("modpackctl.toml.example")
 CLIENT_UPDATE_SCRIPT = Path("client-updater-template.py")   # client updater source template
 SERVER_UPDATE_SCRIPT = Path("server-updater-template.py")   # server updater source template
 _DANCE_DEFAULT_URL  = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
@@ -676,34 +683,6 @@ def download_mod(project_id: str, file_id: str, force: bool = False) -> dict:
 
 
 # -------------------------
-# INIT
-# -------------------------
-
-
-def update_readme_modloader(modloader_id: str, readme_path: Path = Path("README.md")) -> bool:
-    """
-    Replace every known modloader version string in README.md with the display
-    form of modloader_id (e.g. 'neoforge-21.1.250' → 'NeoForge 21.1.250').
-    Returns True if the file was updated, False if unchanged or not found.
-    """
-    if not modloader_id or not readme_path.exists():
-        return False
-    display  = _modloader_display(modloader_id)
-    names    = "|".join(re.escape(n) for n in _LOADER_DISPLAY_NAMES.values())
-    original = readme_path.read_text(encoding="utf-8")
-    updated  = re.sub(rf"(?:{names})\s+[\d.]+", display, original)
-    if updated == original:
-        return False
-    readme_path.write_text(updated, encoding="utf-8")
-    return True
-
-
-# -------------------------
-# INIT
-# -------------------------
-
-
-# -------------------------
 # README AUTO-UPDATE
 # -------------------------
 
@@ -715,17 +694,16 @@ def _update_readme_modloader(old_modloader: str, new_modloader: str) -> bool:
     On subsequent modloader changes, replaces the previous modloader string.
     Returns True if README.md was modified.
     """
-    readme_path = Path("README.md")
-    if not readme_path.exists() or not new_modloader:
+    if not README.exists() or not new_modloader:
         return False
-    content = readme_path.read_text(encoding="utf-8")
+    content = README.read_text(encoding="utf-8")
     if "__MODLOADER__" in content:
         updated = content.replace("__MODLOADER__", new_modloader)
     elif old_modloader and old_modloader in content:
         updated = content.replace(old_modloader, new_modloader)
     else:
         return False
-    readme_path.write_text(updated, encoding="utf-8")
+    README.write_text(updated, encoding="utf-8")
     return True
 
 
@@ -1382,7 +1360,9 @@ def _get_notes_file_for_release(version: str, message: str = "", side: str = "")
             prev_version = log[index - 1]["version"] if index > 0 else None
             break
 
-    notes_path = Path(f".modpackctl_notes_{version}.md")
+    notes_fd, notes_str = tempfile.mkstemp(suffix=".md", prefix=f"modpackctl_notes_{version}_")
+    os.close(notes_fd)
+    notes_path = Path(notes_str)
     if prev_version:
         print(f"Generating notes comparing {prev_version} → {version}...")
         changelog(prev_version, version, out=str(notes_path), message=message,
@@ -1556,7 +1536,7 @@ def _prepare_icon() -> Path | None:
         return None
     try:
         from PIL import Image  # type: ignore[import]
-        ico_path = Path(".pyinstaller") / "icon.ico"
+        ico_path = PYINSTALLER / "icon.ico"
         ico_path.parent.mkdir(parents=True, exist_ok=True)
         with urllib.request.urlopen(logo_url, timeout=10) as response:
             image_data = response.read()
@@ -1581,7 +1561,7 @@ def _prepare_dance_assets() -> tuple[Path, Path] | None:
     """
     cfg        = load_config()
     dance_url  = cfg.get("settings", {}).get("secret_video_url", _DANCE_DEFAULT_URL)
-    dance_dir  = Path(".pyinstaller") / "dance"
+    dance_dir  = PYINSTALLER / "dance"
     dance_dir.mkdir(parents=True, exist_ok=True)
     video_path = dance_dir / "dance_video.mp4"
     audio_path = dance_dir / "dance_audio.wav"
@@ -1669,8 +1649,8 @@ def _build_exe(source_py: Path) -> Path | None:
                 "--collect-all", "imageio_ffmpeg",
                 "--collect-all", "PIL",
                 "--distpath", str(source_py.parent),
-                "--workpath", str(Path(".pyinstaller") / "work"),
-                "--specpath", str(Path(".pyinstaller")),
+                "--workpath", str(PYINSTALLER / "work"),
+                "--specpath", str(PYINSTALLER),
                 str(source_py),
             ],
             check=True,
@@ -1826,11 +1806,21 @@ def build_pages() -> None:
     if not REPO.exists():
         print("[ERROR] Repository not initialized. Run 'init' first.")
         sys.exit(1)
-    dest = Path("gh-pages")
+    dest = PAGES_OUTPUT
     dest.mkdir(parents=True, exist_ok=True)
     _write_pages_assets(dest)
     print(f"[OK] Built gh-pages assets → {dest}/")
     print("     Push the contents of this folder to your gh-pages branch.")
+
+
+def _ensure_template(template_path: Path) -> None:
+    """Copy a bundled template to the CWD if it does not already exist there."""
+    if template_path.exists():
+        print(f"[INFO] Using existing {template_path.name}")
+    else:
+        source = _HERE / template_path.name
+        shutil.copy2(source, template_path)
+        print(f"[INFO] Copied {template_path.name} to current directory — you can customise it for this modpack.")
 
 
 def bake_client_updater() -> bool:
@@ -1846,6 +1836,7 @@ def bake_client_updater() -> bool:
       __SECRET_VIDEO_URL__ — easter egg video URL (defaults to Never Gonna Give You Up)
       __ENABLE_RAINBOW__   — True/False; settings.enable_rainbow from modpackctl.toml (default: True)
     """
+    _ensure_template(CLIENT_UPDATE_SCRIPT)
     if not CLIENT_UPDATE_SCRIPT.exists():
         print(f"[WARN] {CLIENT_UPDATE_SCRIPT} not found — skipping updater bake.")
         return False
@@ -1882,6 +1873,7 @@ def bake_server_updater() -> bool:
       __GITHUB_REPO__  — GitHub repo name from modpackctl.toml
       __MODPACK_NAME__ — settings.modpack_name from modpackctl.toml
     """
+    _ensure_template(SERVER_UPDATE_SCRIPT)
     if not SERVER_UPDATE_SCRIPT.exists():
         print(f"[WARN] {SERVER_UPDATE_SCRIPT} not found — skipping server updater bake.")
         return False
@@ -2193,6 +2185,5 @@ if __name__ == "__main__":
             sys.exit(1)
 
     elif args.command == "export-example":
-        example_path = Path("modpackctl.toml.example")
-        example_path.write_text(DEFAULT_CONFIG, encoding="utf-8")
-        print(f"[OK] Written to {example_path}")
+        CONFIG_EXAMPLE.write_text(DEFAULT_CONFIG, encoding="utf-8")
+        print(f"[OK] Written to {CONFIG_EXAMPLE}")
