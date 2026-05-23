@@ -48,9 +48,9 @@ RELEASES         = Path("releases")
 README           = Path("README.md")
 PYINSTALLER      = Path(".pyinstaller")
 PAGES_OUTPUT     = Path("gh-pages")
-CONFIG_EXAMPLE   = Path("modpackctl.toml.example")
-CLIENT_UPDATE_SCRIPT = Path("client-updater-template.py")   # client updater source template
-SERVER_UPDATE_SCRIPT = Path("server-updater-template.py")   # server updater source template
+CONFIG_EXAMPLE   = Path("modpackctl.example.toml")
+CLIENT_UPDATE_SCRIPT = Path("client-updater.example.py")   # client updater source template
+SERVER_UPDATE_SCRIPT = Path("server-updater.example.py")   # server updater source template
 _DANCE_DEFAULT_URL  = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
 
 _GITIGNORE_ENTRIES  = [
@@ -115,6 +115,15 @@ modpack_name = "<YourModpackName>"
 # Whether to show the rainbow effect in the easter egg (optional; default: false)
 # enable_rainbow = true
 
+# Server address shown to players in README.md (used by __SERVER_ADDRESS__ placeholder)
+# server_address = "play.example.com"
+
+# Discord invite URL (used by __DISCORD_URL__ placeholder in README.md)
+# discord_url = "https://discord.gg/yourInvite"
+
+# Live map URL (used by __MAP_URL__ placeholder in README.md)
+# map_url = "https://map.example.com"
+
 # List project IDs to exclude from client releases (server-side only mods)
 server_only = []
 
@@ -167,7 +176,7 @@ def _init_git_repo() -> None:
 def _init_working_dir() -> None:
     """
     If no modpackctl.toml exists in the current directory, prompt the user to initialize
-    a working directory here. On confirmation, copies modpackctl.toml.example and both
+    a working directory here. On confirmation, copies modpackctl.example.toml and both
     updater templates from the script directory, initializes a git repo, then exits so
     the user can edit the config.
     """
@@ -755,24 +764,109 @@ def download_mod(project_id: str, file_id: str, force: bool = False) -> dict:
 # -------------------------
 
 
-def _update_readme_modloader(old_modloader: str, new_modloader: str) -> bool:
+def _update_readme(version: str) -> bool:
     """
-    Replace the modloader version string in README.md.
-    On first use, replaces the __MODLOADER__ placeholder.
-    On subsequent modloader changes, replaces the previous modloader string.
+    Update README.md placeholders for the given committed version.
+
+    Dynamic placeholders are updated whenever the value changes between versions;
+    static placeholders are replaced once and then left alone.
+
+    Dynamic (tracked — updated on modloader/MC version changes):
+      __MODLOADER__          — full modloader id, e.g. neoforge-21.1.229
+      __MODLOADER_TYPE__     — loader name only, e.g. NeoForge
+      __MINECRAFT_VERSION__  — Minecraft version string, e.g. 1.21.1
+
+    Static (one-time — replaced on first build, not tracked after):
+      __MODPACK_NAME__   — settings.modpack_name
+      __RELEASES_URL__   — https://github.com/<user>/<repo>/releases
+      __AUTHOR__         — settings.author
+      __SERVER_ADDRESS__ — settings.server_address
+      __DISCORD_URL__    — settings.discord_url
+      __MAP_URL__        — settings.map_url
+
     Returns True if README.md was modified.
     """
-    if not README.exists() or not new_modloader:
+    if not README.exists():
         return False
-    content = README.read_text(encoding="utf-8")
-    if "__MODLOADER__" in content:
-        updated = content.replace("__MODLOADER__", new_modloader)
-    elif old_modloader and old_modloader in content:
-        updated = content.replace(old_modloader, new_modloader)
-    else:
+
+    log = load_log()
+    entry = next((e for e in log if e["version"] == version), None)
+    if not entry:
         return False
-    README.write_text(updated, encoding="utf-8")
-    return True
+
+    new_modloader        = entry.get("modloader", "")
+    new_minecraft        = entry.get("minecraft_version", "")
+    idx                  = log.index(entry)
+    prev                 = log[idx - 1] if idx > 0 else {}
+    old_modloader        = prev.get("modloader", "")
+    old_minecraft        = prev.get("minecraft_version", "")
+    old_version          = prev.get("version", "")
+
+    content  = README.read_text(encoding="utf-8")
+    modified = False
+
+    # Dynamic: __MODLOADER__
+    if new_modloader:
+        if "__MODLOADER__" in content:
+            content  = content.replace("__MODLOADER__", new_modloader)
+            modified = True
+        elif old_modloader and old_modloader != new_modloader and old_modloader in content:
+            content  = content.replace(old_modloader, new_modloader)
+            modified = True
+
+    # Dynamic: __MODLOADER_TYPE__
+    if new_modloader:
+        new_prefix = new_modloader.split("-")[0]
+        new_type   = _LOADER_DISPLAY_NAMES.get(new_prefix.lower()) or new_prefix.capitalize()
+        old_prefix = old_modloader.split("-")[0] if old_modloader else ""
+        old_type   = (_LOADER_DISPLAY_NAMES.get(old_prefix.lower()) or old_prefix.capitalize()) if old_prefix else ""
+        if "__MODLOADER_TYPE__" in content:
+            content  = content.replace("__MODLOADER_TYPE__", new_type)
+            modified = True
+        elif old_type and old_type != new_type and old_type in content:
+            content  = content.replace(old_type, new_type)
+            modified = True
+
+    # Dynamic: __MINECRAFT_VERSION__
+    if new_minecraft:
+        if "__MINECRAFT_VERSION__" in content:
+            content  = content.replace("__MINECRAFT_VERSION__", new_minecraft)
+            modified = True
+        elif old_minecraft and old_minecraft != new_minecraft and old_minecraft in content:
+            content  = content.replace(old_minecraft, new_minecraft)
+            modified = True
+
+    # Dynamic: __LATEST_VERSION__
+    if "__LATEST_VERSION__" in content:
+        content  = content.replace("__LATEST_VERSION__", version)
+        modified = True
+    elif old_version and old_version != version and old_version in content:
+        content  = content.replace(old_version, version)
+        modified = True
+
+    # Static one-time replacements from config
+    cfg      = load_config()
+    settings = cfg.get("settings", {})
+    github   = cfg.get("github", {})
+    gh_user  = github.get("user", "")
+    gh_repo  = github.get("repo", "")
+    statics  = {
+        "__MODPACK_NAME__":   settings.get("modpack_name", ""),
+        "__FILE_PREFIX__":    settings.get("file_prefix") or settings.get("modpack_name", ""),
+        "__RELEASES_URL__":   f"https://github.com/{gh_user}/{gh_repo}/releases" if gh_user and gh_repo else "",
+        "__AUTHOR__":         settings.get("author", ""),
+        "__SERVER_ADDRESS__": settings.get("server_address", ""),
+        "__DISCORD_URL__":    settings.get("discord_url", ""),
+        "__MAP_URL__":        settings.get("map_url", ""),
+    }
+    for placeholder, value in statics.items():
+        if value and placeholder in content:
+            content  = content.replace(placeholder, value)
+            modified = True
+
+    if modified:
+        README.write_text(content, encoding="utf-8")
+    return modified
 
 
 def init(source: str, force: bool = False) -> None:
@@ -876,8 +970,6 @@ def commit(source: str, major: bool = False, message: str = "") -> tuple[str, st
 
     if modloader_changed:
         print(f"  [!] Modloader updated: {old_modloader} → {new_modloader}")
-    if new_modloader and _update_readme_modloader(old_modloader, new_modloader):
-        print(f"  [i] README.md modloader updated.")
     if changes["added"]:
         print(f"  [+] {len(changes['added'])} mod(s) added")
     if changes["removed"]:
@@ -1150,6 +1242,10 @@ def update(
         summary += f", {failed} failed"
     print(f"\n[OK] Updated to {label}  ({summary})")
 
+    if suffix != "server":
+        if _update_readme(version):
+            print(f"  [i] README.md updated.")
+
     return {"downloaded": downloaded, "cached": cached, "failed": failed, "ok": ok}
 
 
@@ -1226,7 +1322,7 @@ def release(
 
 
 def release_client(version: str) -> Path | None:
-    """Build a client release zip and CurseForge export zip, excluding server_only mods, and bake client-updater-template.py."""
+    """Build a client release zip and CurseForge export zip, excluding server_only mods, and bake client-updater.example.py."""
     print(f"Building client release for v{version}...")
     excluded = get_filter_list("server_only")
     if not excluded:
@@ -1242,7 +1338,7 @@ def release_client(version: str) -> Path | None:
 
 
 def release_server(version: str) -> Path | None:
-    """Build a server release zip, excluding client-only mods, shaderpacks, and resourcepacks, and bake server-updater-template.py."""
+    """Build a server release zip, excluding client-only mods, shaderpacks, and resourcepacks, and bake server-updater.example.py."""
     excluded = get_filter_list("client_only")
     if not excluded:
         print("[WARN] No client_only list found in config — building full release.")
@@ -1760,7 +1856,7 @@ def _clear_icon_cache() -> None:
 
 
 def build_exe() -> None:
-    """Build the baked updater exe from releases/{file_prefix}-updater.py."""
+    """Build the baked updater exe from releases/{file_prefix}-client-updater.py."""
     if not bake_client_updater():
         sys.exit(1)
     if not _build_exe(_baked_client_updater_path()):
@@ -1891,25 +1987,37 @@ def _ensure_template(template_path: Path) -> None:
         print(f"[INFO] Copied {template_path.name} to current directory — you can customise it for this modpack.")
 
 
-def reset_template(server: bool = False) -> None:
-    target = SERVER_UPDATE_SCRIPT if server else CLIENT_UPDATE_SCRIPT
-    if not target.exists():
-        print(f"[INFO] {target} does not exist — nothing to remove.")
-        return
-    answer = input(f"Delete {target} from the current directory? [y/N] ").strip().lower()
-    if answer not in ("y", "yes"):
-        print("[INFO] Aborted.")
-        sys.exit(0)
-    target.unlink()
-    print(f"[OK] Deleted {target}.")
+def reset_file(server: bool = False, config: bool = False) -> None:
+    if config:
+        src = _HERE / CONFIG_EXAMPLE.name
+        if not src.exists():
+            print(f"[ERROR] Bundled {CONFIG_EXAMPLE.name} not found.")
+            sys.exit(1)
+        answer = input(f"Overwrite {CONFIG_FILE} with {CONFIG_EXAMPLE.name}? This will erase your current config. [y/N] ").strip().lower()
+        if answer not in ("y", "yes"):
+            print("[INFO] Aborted.")
+            sys.exit(0)
+        shutil.copy2(src, CONFIG_FILE)
+        print(f"[OK] {CONFIG_FILE} reset from {CONFIG_EXAMPLE.name}.")
+    else:
+        target = SERVER_UPDATE_SCRIPT if server else CLIENT_UPDATE_SCRIPT
+        if not target.exists():
+            print(f"[INFO] {target} does not exist — nothing to remove.")
+            return
+        answer = input(f"Delete {target} from the current directory? [y/N] ").strip().lower()
+        if answer not in ("y", "yes"):
+            print("[INFO] Aborted.")
+            sys.exit(0)
+        target.unlink()
+        print(f"[OK] Deleted {target}.")
 
 
 def bake_client_updater() -> bool:
     """
-    Substitute config placeholders in client-updater-template.py and write the result to
-    releases/{file_prefix}-updater.py. Returns False if client-updater-template.py is not present.
+    Substitute config placeholders in client-updater.example.py and write the result to
+    releases/{file_prefix}-updater.py. Returns False if client-updater.example.py is not present.
 
-    Supported placeholders (written as bare Python string literals in client-updater-template.py):
+    Supported placeholders (written as bare Python string literals in client-updater.example.py):
       __GITHUB_USER__      — GitHub username from modpackctl.toml
       __GITHUB_REPO__      — GitHub repo name from modpackctl.toml
       __MODPACK_NAME__     — settings.modpack_name from modpackctl.toml
@@ -1946,7 +2054,7 @@ def bake_client_updater() -> bool:
 
 def bake_server_updater() -> bool:
     """
-    Substitute config placeholders in server-updater-template.py and write the result to
+    Substitute config placeholders in server-updater.example.py and write the result to
     releases/{file_prefix}-server-updater.py. Returns False if the template is not present.
 
     Supported placeholders:
@@ -2179,9 +2287,11 @@ if __name__ == "__main__":
     parser_bake = subparsers.add_parser("bake-updater", help="Bake the updater script with config values")
     parser_bake.add_argument("--server", action="store_true", help="Bake server-updater.py instead of client-updater.py (no exe)")
 
-    # reset-template
-    parser_reset_tmpl = subparsers.add_parser("reset-template", help="Delete the updater template from the current directory")
-    parser_reset_tmpl.add_argument("--server", action="store_true", help="Delete server-updater-template.py instead of client-updater-template.py")
+    # reset-file
+    parser_reset_tmpl = subparsers.add_parser("reset-file", help="Reset an example file in the current directory")
+    parser_reset_file_group = parser_reset_tmpl.add_mutually_exclusive_group()
+    parser_reset_file_group.add_argument("--server", action="store_true", help="Delete server-updater.example.py (restored from bundled copy on next bake)")
+    parser_reset_file_group.add_argument("--config", action="store_true", help="Overwrite modpackctl.toml with modpackctl.example.toml")
 
     # build-exe
     subparsers.add_parser("build-exe", help="Build releases/client-updater.exe from the baked client updater")
@@ -2191,7 +2301,7 @@ if __name__ == "__main__":
     parser_export_cf.add_argument("version", help="Version to export")
 
     # export-example
-    subparsers.add_parser("export-example", help="Write modpackctl.toml.example from the built-in defaults")
+    subparsers.add_parser("export-example", help="Write modpackctl.example.toml from the built-in defaults")
 
     if argcomplete:
         argcomplete.autocomplete(parser)
@@ -2269,8 +2379,8 @@ if __name__ == "__main__":
         if not export_cf(args.version):
             sys.exit(1)
 
-    elif args.command == "reset-template":
-        reset_template(args.server)
+    elif args.command == "reset-file":
+        reset_file(args.server, args.config)
 
     elif args.command == "export-example":
         CONFIG_EXAMPLE.write_text(DEFAULT_CONFIG, encoding="utf-8")

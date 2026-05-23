@@ -123,7 +123,7 @@ modpackctl init MyModpack-1.0.0.zip
 ```
 No modpackctl.toml found in the current directory.
 Initialize a working directory here? (This will also create a git repo.) [y/N] y
-[OK] Copied modpackctl.toml.example → modpackctl.toml
+[OK] Copied modpackctl.example.toml → modpackctl.toml
 ...
 Working directory initialized. Edit modpackctl.toml then re-run your command.
 ```
@@ -220,10 +220,10 @@ python modpackctl.py publish 1.2.0 --message "Improved performance and fixed cra
 | `purge [--all]` | Remove stale files from the download cache. Without `--all`, only removes mods not in the latest snapshot. |
 | `build-pages` | Write `versions.json` and `snapshots/` to a local `gh-pages/` folder. Useful for manually pushing to `gh-pages` if `publish` fails. |
 | `bake-updater [--server]` | Bake `releases/{file_prefix}-client-updater.py` from the client updater template. `--server` bakes `releases/{file_prefix}-server-updater.py` instead (no exe). |
-| `reset-template [--server]` | Delete `client-updater-template.py` from the current directory (prompts for confirmation). `--server` deletes `server-updater-template.py` instead. Useful for reverting local customisations so the next bake restores the bundled default. |
+| `reset-file [--server\|--config]` | Reset an example file in the current directory. Default deletes `client-updater.example.py` so the next bake restores the bundled copy. `--server` does the same for `server-updater.example.py`. `--config` overwrites `modpackctl.toml` with `modpackctl.example.toml`. |
 | `build-exe` | Build `releases/{file_prefix}-client-updater.exe` from the baked client updater using PyInstaller. When `enable_secret` is true, also downloads and bundles the easter egg video and audio. Requires `pip install pyinstaller yt-dlp imageio-ffmpeg Pillow`. Also runs automatically as part of `release`. |
 | `export-cf <version>` | Build a CurseForge-format modpack zip for the given version, suitable for importing directly into the CurseForge launcher. Includes `manifest.json`, `modlist.html`, and the stored overrides with `bcc-common.toml` stamped with the correct version. |
-| `export-example` | Write the built-in config template to `modpackctl.toml.example`. |
+| `export-example` | Write the built-in config template to `modpackctl.example.toml`. |
 
 ## Version Bumping
 
@@ -236,13 +236,23 @@ Versions follow `major.minor.patch`. The next version is calculated automaticall
 
 ## README Auto-Update
 
-Place the `__MODLOADER__` placeholder anywhere in your `README.md` to have modpackctl keep it up to date automatically:
+Place any of the following placeholders in your `README.md` and modpackctl will substitute them automatically when you run `update` (or any command that calls it, such as `release` or `publish`). Server builds (`--server`) never touch the README.
 
-```markdown
-Modloader: __MODLOADER__
-```
+| Placeholder | Replaced with |
+|---|---|
+| `__MODLOADER__` | Full modloader id, e.g. `neoforge-21.1.229`. Kept in sync whenever the modloader changes. |
+| `__MODLOADER_TYPE__` | Loader name only, e.g. `NeoForge`. Kept in sync whenever the modloader changes. |
+| `__MINECRAFT_VERSION__` | Minecraft version, e.g. `1.21.1`. Kept in sync whenever the MC version changes. |
+| `__LATEST_VERSION__` | Modpack version, e.g. `1.2.0`. Kept in sync on every build. |
+| `__MODPACK_NAME__` | `settings.modpack_name` from `modpackctl.toml` |
+| `__FILE_PREFIX__` | `settings.file_prefix`, falling back to `settings.modpack_name` |
+| `__RELEASES_URL__` | `https://github.com/<user>/<repo>/releases`, constructed from `modpackctl.toml` |
+| `__AUTHOR__` | `settings.author` from `modpackctl.toml` |
+| `__SERVER_ADDRESS__` | `settings.server_address` from `modpackctl.toml` |
+| `__DISCORD_URL__` | `settings.discord_url` from `modpackctl.toml` |
+| `__MAP_URL__` | `settings.map_url` from `modpackctl.toml` |
 
-On the first `commit` that detects a modloader version, `__MODLOADER__` is replaced with the actual id (e.g. `neoforge-21.1.229`). On every subsequent `commit` where the modloader changes, the old id is replaced with the new one in-place. No action is needed beyond the initial placeholder — modpackctl handles it from there.
+A `README.example.md` is included in the modpackctl directory as a starting point.
 
 ## Player Updater
 
@@ -260,9 +270,9 @@ The flow:
 
 A **⚙ gear button** in the header opens the colour settings dialog, where players can customise all UI colours with a colour picker. Settings are saved to prefs and persist between runs.
 
-**Generating the client updater:** Running `release` (or `publish`) reads your `modpackctl.toml` and substitutes placeholders in `client-updater-template.py`, writing the result to `releases/{file_prefix}-client-updater.py`. It then attempts to build `releases/{file_prefix}-client-updater.exe` via PyInstaller. Both files are pre-configured for your repo and require no setup on the player's end. Run `bake-updater` to produce just the script without building a release zip.
+**Generating the client updater:** Running `release` (or `publish`) reads your `modpackctl.toml` and substitutes placeholders in `client-updater.example.py`, writing the result to `releases/{file_prefix}-client-updater.py`. It then attempts to build `releases/{file_prefix}-client-updater.exe` via PyInstaller. Both files are pre-configured for your repo and require no setup on the player's end. Run `bake-updater` to produce just the script without building a release zip.
 
-Use these placeholders as plain string literals anywhere in `client-updater-template.py`:
+Use these placeholders as plain string literals anywhere in `client-updater.example.py`:
 
 | Placeholder | Replaced with |
 |---|---|
@@ -293,7 +303,7 @@ To enable exe building, install the build dependencies once: `pip install pyinst
 
 ## Server Updater
 
-`server-updater-template.py` is a CLI script for keeping the server's mods folder in sync with published releases. It excludes client-only mods (as listed in `versions.json`) and non-mod categories (shaderpacks, resourcepacks).
+`server-updater.example.py` is a CLI script for keeping the server's mods folder in sync with published releases. It excludes client-only mods (as listed in `versions.json`) and non-mod categories (shaderpacks, resourcepacks).
 
 ```
 python server-updater.py [server_dir] [--version VERSION] [--fresh] [--yes] [--workers N]
@@ -312,7 +322,7 @@ The script detects and records the installed version via `config/bcc-common.toml
 
 **Generating:** Run `bake-updater --server` to write `releases/{file_prefix}-server-updater.py` with your GitHub credentials baked in.
 
-Use these placeholders as plain string literals anywhere in `server-updater-template.py`:
+Use these placeholders as plain string literals anywhere in `server-updater.example.py`:
 
 | Placeholder | Replaced with |
 |---|---|
