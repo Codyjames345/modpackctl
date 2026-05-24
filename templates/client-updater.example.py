@@ -1354,7 +1354,7 @@ class UpdaterApp(tk.Tk):
                     font=FONT_MONO, bg=DARK_BG, fg=TEXT_DIM,
                 ).pack(side="left")
 
-            wipe_folders = list(dict.fromkeys(CATEGORY_DIRS + self.override_folders))
+            wipe_folders = list(CATEGORY_DIRS)
             folder_list  = ", ".join(f"{name}/" for name in wipe_folders)
 
             fresh_var = tk.BooleanVar(value=self.fresh_install or not self.local_version)
@@ -1492,12 +1492,9 @@ class UpdaterApp(tk.Tk):
                 plan = build_update_plan(self.old_snapshot, self.new_snapshot, self.modpack_dir)
                 if self.fresh_install:
                     plan["delete"].extend(
-                        collect_wipe_targets(
-                            self.modpack_dir,
-                            list(dict.fromkeys(CATEGORY_DIRS + self.override_folders)),
-                        )
+                        collect_wipe_targets(self.modpack_dir, CATEGORY_DIRS)
                     )
-                elif reset_var.get():
+                if reset_var.get():
                     plan["delete"].extend(
                         collect_wipe_targets(self.modpack_dir, self.override_folders)
                     )
@@ -1642,49 +1639,48 @@ class UpdaterApp(tk.Tk):
                     wraplength=560, justify="left",
                 ).pack(fill="x", padx=20, pady=(0, 8))
 
-            # "Reset overrides" toggle — hidden during fresh install (already wipes overrides).
-            if not self.fresh_install:
-                reset_row = tk.Frame(frame, bg=DARK_BG, padx=20)
-                reset_row.pack(fill="x", pady=(4, 0))
-                override_list = ", ".join(f"{name}/" for name in self.override_folders)
-                if not self.override_folders:
-                    reset_text  = "Reset overrides  (no override folders in this modpack)"
-                    reset_state = "disabled"
-                else:
-                    reset_text  = (
-                        f"Reset overrides  (wipes and re-extracts {override_list}"
-                        " — discards your edits to config files and similar)"
-                    )
-                    reset_state = "normal"
-                reset_inner = tk.Frame(reset_row, bg=DARK_BG)
-                reset_inner.pack(anchor="w", fill="x", padx=(8, 0))
-                reset_cb = tk.Checkbutton(
-                    reset_inner, variable=reset_var,
-                    bg=DARK_BG, selectcolor=YELLOW,
-                    activebackground=DARK_BG,
-                    disabledforeground=TEXT_DIM,
-                    state=reset_state,
-                    relief="flat", bd=0,
+            # "Reset overrides" toggle
+            reset_row = tk.Frame(frame, bg=DARK_BG, padx=20)
+            reset_row.pack(fill="x", pady=(4, 0))
+            override_list = ", ".join(f"{name}/" for name in self.override_folders)
+            if not self.override_folders:
+                reset_text  = "Reset overrides  (no override folders in this modpack)"
+                reset_state = "disabled"
+            else:
+                reset_text  = (
+                    f"Reset overrides  (wipes and re-extracts {override_list}"
+                    " — discards your edits to config files and similar)"
                 )
-                reset_cb.pack(side="left", anchor="w")
-                reset_lbl = tk.Label(
-                    reset_inner,
-                    text=reset_text,
-                    font=FONT_BODY, bg=DARK_BG, fg=TEXT_DIM,
-                    wraplength=560, justify="left", anchor="nw",
-                )
-                reset_lbl.pack(side="left", fill="x", expand=True, anchor="nw")
-                if reset_state == "normal":
-                    reset_lbl.config(cursor="hand2")
-                    def _on_reset_cb_command() -> None:
-                        _render()
-                        reset_lbl.config(fg=YELLOW if reset_var.get() else TEXT_DIM)
-                    reset_cb.config(command=_on_reset_cb_command)
-                    def _on_reset_lbl_click(_) -> None:
-                        reset_var.set(not reset_var.get())
-                        _render()
-                        reset_lbl.config(fg=YELLOW if reset_var.get() else TEXT_DIM)
-                    reset_lbl.bind("<Button-1>", _on_reset_lbl_click)
+                reset_state = "normal"
+            reset_inner = tk.Frame(reset_row, bg=DARK_BG)
+            reset_inner.pack(anchor="w", fill="x", padx=(8, 0))
+            reset_cb = tk.Checkbutton(
+                reset_inner, variable=reset_var,
+                bg=DARK_BG, selectcolor=YELLOW,
+                activebackground=DARK_BG,
+                disabledforeground=TEXT_DIM,
+                state=reset_state,
+                relief="flat", bd=0,
+            )
+            reset_cb.pack(side="left", anchor="w")
+            reset_lbl = tk.Label(
+                reset_inner,
+                text=reset_text,
+                font=FONT_BODY, bg=DARK_BG, fg=TEXT_DIM,
+                wraplength=560, justify="left", anchor="nw",
+            )
+            reset_lbl.pack(side="left", fill="x", expand=True, anchor="nw")
+            if reset_state == "normal":
+                reset_lbl.config(cursor="hand2")
+                def _on_reset_cb_command() -> None:
+                    _render()
+                    reset_lbl.config(fg=YELLOW if reset_var.get() else TEXT_DIM)
+                reset_cb.config(command=_on_reset_cb_command)
+                def _on_reset_lbl_click(_) -> None:
+                    reset_var.set(not reset_var.get())
+                    _render()
+                    reset_lbl.config(fg=YELLOW if reset_var.get() else TEXT_DIM)
+                reset_lbl.bind("<Button-1>", _on_reset_lbl_click)
 
             button_row = tk.Frame(frame, bg=DARK_BG)
             button_row.pack(fill="x", padx=20, pady=12)
@@ -1851,10 +1847,8 @@ class UpdaterApp(tk.Tk):
                     self._log(f"  [warn] could not install {tmp_path.name}: {exc}", "log_warn")
 
             # Phase 4: apply overrides
-            # overwrite=True extracts everything; False adds only missing files.
+            # self.reset_overrides=True extracts everything; False adds only missing files.
             self._set_progress("Applying overrides…")
-            # Wiped folders (fresh or reset_overrides) get a full re-extract; otherwise add new files only.
-            overwrite = self.fresh_install or self.reset_overrides
             # Re-fetch only if we didn't already cache the bytes during _run_check.
             override_zip = self.override_zip
             if override_zip is None:
@@ -1865,7 +1859,7 @@ class UpdaterApp(tk.Tk):
             if override_zip:
                 applied = apply_overrides_zip(
                     self.modpack_dir, override_zip,
-                    new_files_only=not overwrite,
+                    new_files_only=not self.reset_overrides,
                 )
                 for rel_path in applied:
                     self._log(f"  + {rel_path}", "log_add")

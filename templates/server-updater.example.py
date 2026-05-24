@@ -500,7 +500,7 @@ def main() -> None:
         dest="fresh",
         action="store_true",
         default=None,
-        help="Wipe mods/ and every overrides folder, then reinstall everything from scratch.",
+        help="Wipe mods/ and reinstall everything from scratch.",
     )
     fresh_group.add_argument(
         "--no-fresh",
@@ -511,7 +511,7 @@ def main() -> None:
     parser.add_argument(
         "--reset-overrides",
         action="store_true",
-        help="Wipe and re-extract every overrides folder (config/, kubejs/, etc.). Ignored when --fresh is used.",
+        help="Wipe and re-extract every overrides folder (config/, kubejs/, etc.).",
     )
     parser.add_argument(
         "--workers",
@@ -603,8 +603,8 @@ def main() -> None:
         pass
     override_folders: list[str] = get_override_folders(override_zip) if override_zip else []
 
-    # Folders wiped on fresh install: category dirs + override folders.
-    fresh_wipe_dirs = list(dict.fromkeys(CATEGORY_DIRS + override_folders))
+    # Folders wiped on fresh install: category dirs only (override folders are independent).
+    fresh_wipe_dirs = list(CATEGORY_DIRS)
 
     # ---- Print plan summary ----
     print(f"\n{MODPACK_NAME} Server Updater")
@@ -632,7 +632,7 @@ def main() -> None:
             print(f"[WARN] The following folders will be cleared: {folder_list}")
 
     if installed_version == _bcc_version(target_version) and not fresh:
-        print(f"\n[OK] Already on version {target_version}. Nothing to do.")
+        print(f"\n[OK] Already on version {target_version} — nothing to do.")
         sys.exit(0)
 
     # ---- Fetch snapshots ----
@@ -666,10 +666,8 @@ def main() -> None:
             old_snapshot = filter_for_server(old_raw_snapshot, client_only_ids)
 
     # ---- Reset overrides prompt (before changelog so it reflects the decision) ----
-    # Fresh install already wipes everything, so the override-reset choice only
-    # matters during incremental updates.
-    reset_overrides = bool(args.reset_overrides) and not fresh
-    if override_folders and not fresh and not reset_overrides:
+    reset_overrides = bool(args.reset_overrides)
+    if override_folders and not reset_overrides:
         override_list = ", ".join(f"{name}/" for name in override_folders)
         reset_prompt = f"\nWould you like to reset overrides? The following folders will be wiped and re-extracted:\n{override_list}"
         try:
@@ -685,7 +683,7 @@ def main() -> None:
     if fresh:
         for folder_name in fresh_wipe_dirs:
             plan["delete"].extend(collect_wipe_targets(server_dir, [folder_name]))
-    elif reset_overrides:
+    if reset_overrides:
         plan["delete"].extend(collect_wipe_targets(server_dir, override_folders))
 
     # ---- Show changelog ----
@@ -767,12 +765,10 @@ def main() -> None:
                 print(f"  [WARN] Could not delete {file_path.name}: {error}")
 
     # ---- Apply overrides ----
-    # Wiped folders (fresh or reset_overrides) get a full re-extract; otherwise add new files only.
-    overwrite = fresh or reset_overrides
     if override_zip:
-        applied = apply_overrides_zip(server_dir, override_zip, new_files_only=not overwrite)
+        applied = apply_overrides_zip(server_dir, override_zip, new_files_only=not reset_overrides)
         if applied:
-            label = "Resetting overrides:" if overwrite else "Applying new override files:"
+            label = "Resetting overrides:" if reset_overrides else "Applying new override files:"
             print(f"\n{label}")
             for rel_path in applied:
                 print(f"  + {rel_path}")
