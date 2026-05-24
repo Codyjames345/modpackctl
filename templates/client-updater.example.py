@@ -72,6 +72,10 @@ if "__" in LOGO_URL:
 
 HEADERS = {"User-Agent": f"{GITHUB_REPO}-updater/1.0"}
 
+# Top-level category folders the client wipes on a fresh install. Override folders
+# (config/, kubejs/, etc.) are added dynamically from the overrides zip at runtime.
+CATEGORY_DIRS: list[str] = ["mods", "shaderpacks", "resourcepacks"]
+
 
 # -------------------------
 # PREFS  (remembers the modpack folder between runs)
@@ -375,6 +379,55 @@ def apply_overrides_zip(install_dir: Path, zip_bytes: bytes, new_files_only: boo
     return applied
 
 
+def get_override_folders(override_zip: bytes) -> list[str]:
+    """Return sorted top-level folder names contained in the overrides zip."""
+    folders: set[str] = set()
+    try:
+        with zipfile.ZipFile(io.BytesIO(override_zip)) as zf:
+            for name in zf.namelist():
+                head, sep, _ = name.partition("/")
+                if sep and head:
+                    folders.add(head)
+    except zipfile.BadZipFile:
+        pass
+    return sorted(folders)
+
+
+def collect_wipe_targets(install_dir: Path, folder_names: list[str]) -> list[tuple[Path, str]]:
+    """
+    For each folder name in folder_names, walk install_dir/folder_name and collect every file.
+    Returns a list of (file_path, display_name) tuples where display_name is the filename.
+    """
+    targets: list[tuple[Path, str]] = []
+    for folder_name in folder_names:
+        folder_path = install_dir / folder_name
+        if not folder_path.is_dir():
+            continue
+        for file_path in folder_path.rglob("*"):
+            if file_path.is_file():
+                targets.append((file_path, file_path.name))
+    return targets
+
+
+def group_deletes_by_folder(
+    deletes: list[tuple[Path, str]],
+    install_dir: Path,
+) -> dict[str, list[str]]:
+    """Group delete entries by their top-level folder under install_dir."""
+    grouped: dict[str, list[str]] = {}
+    for file_path, _ in deletes:
+        try:
+            rel = file_path.relative_to(install_dir)
+            parts = rel.parts
+            folder = parts[0] if len(parts) > 1 else ""
+            sub = "/".join(parts[1:]) if len(parts) > 1 else file_path.name
+        except ValueError:
+            folder = ""
+            sub = file_path.name
+        grouped.setdefault(folder, []).append(sub)
+    return grouped
+
+
 # -------------------------
 # UPDATE PLAN
 # -------------------------
@@ -411,19 +464,12 @@ def build_update_plan(old_snapshot: dict, new_snapshot: dict, modpack_dir: Path)
 # GUI THEME
 # -------------------------
 
-_COLOUR_DEFAULTS: dict[str, str] = {
-    "DARK_BG":   "#0c0431",
-    "PANEL_BG":  "#120647",
-    "ACCENT":    "#fedb0e",
-    "ACCENT_HV": "#d8ba0d",
-    "ACCENT2":   "#630a26",
-    "TEXT":      "#e0e0e0",
-    "TEXT_DIM":  "#7a8a9a",
-    "RED":       "#e05050",
-    "GREEN":     "#00d4aa",
-    "YELLOW":    "#f0c060",
-    "KONAMI":    "#ff69b4",
-}
+# Baked at release time from settings.colours in modpackctl.toml. modpackctl is the
+# single source of truth for the default palette and validates the user's overrides
+# before substituting this placeholder, so the parse is unconditional — an unbaked
+# updater bails out earlier via the GITHUB_USER/GITHUB_REPO check above.
+_COLOUR_DEFAULTS_JSON = "__COLOUR_DEFAULTS_JSON__"
+_COLOUR_DEFAULTS: dict[str, str] = json.loads(_COLOUR_DEFAULTS_JSON)
 
 _COLOUR_LABELS: dict[str, str] = {
     "DARK_BG":   "Background",
@@ -457,6 +503,16 @@ _KONAMI_SEQUENCE  = [
 _DANCE_VIDEO_URL  = "__SECRET_VIDEO_URL__"   # replaced at bake time
 _ENABLE_SECRET    = "__ENABLE_SECRET__"       # replaced at bake time (True / False)
 _ENABLE_RAINBOW   = "__ENABLE_RAINBOW__"      # replaced at bake time (True / False)
+_RAINBOW_BPM_RAW  = "__RAINBOW_BPM__"         # replaced at bake time (float BPM)
+try:
+    _RAINBOW_BPM = float(_RAINBOW_BPM_RAW) if not _RAINBOW_BPM_RAW.startswith("__") else 113.0
+except ValueError:
+    _RAINBOW_BPM = 113.0
+_BEAT_DROP_RAW    = "__BEAT_DROP_SECONDS__"   # replaced at bake time (float seconds)
+try:
+    _BEAT_DROP_SECONDS = float(_BEAT_DROP_RAW) if not _BEAT_DROP_RAW.startswith("__") else 43.5
+except ValueError:
+    _BEAT_DROP_SECONDS = 43.5
 _APPDATA_DIR        = Path.home() / ".modpack-updater"
 _DANCE_VIDEO_FILE = _APPDATA_DIR / "dance_video.mp4"
 _DANCE_AUDIO_FILE = _APPDATA_DIR / "dance_audio.wav"
@@ -676,7 +732,12 @@ class UpdaterApp(tk.Tk):
         self.old_snapshot: dict             = {}
         self.new_snapshot: dict             = {}
         self.update_plan: dict              = {}
-        self.reset_configs: bool            = False
+        self.reset_overrides: bool          = False
+        self.override_zip: bytes | None     = None
+        self.override_folders: list[str]    = []
+        self._dvd_logo_active: bool         = False
+        self._border_rainbow_active: bool   = False
+        self._dance_flash_cancel            = None
 
         # Widget refs reused across screens
         self._current_frame: tk.Frame | None        = None
@@ -694,7 +755,9 @@ class UpdaterApp(tk.Tk):
 
         self._konami_progress: int                  = 0
         self._konami_unlocked: bool                 = False
+        self._konami_permanently_hidden: bool       = False
         self._konami_button_row: tk.Frame | None    = None
+        self._dance_go_back                         = None
         self._dance_visited: bool                   = False
         self._border_rainbow_started: bool          = False
         self._dance_audio_start: float | None       = None
@@ -781,13 +844,41 @@ class UpdaterApp(tk.Tk):
 
     def _start_border_rainbow(self) -> None:
         self._border_rainbow_started = True
+        self._border_rainbow_active = True
+        interval_s = 60.0 / _RAINBOW_BPM
+        start = time.monotonic()
+        beat = [0]
+        prev_hue: list[float | None] = [None]
 
         def step() -> None:
-            r, g, b = colorsys.hsv_to_rgb(random.random(), 1.0, 1.0)
+            if not self._border_rainbow_active:
+                with contextlib.suppress(tk.TclError):
+                    self.configure(bg=DARK_BG)
+                return
+            while True:
+                h = random.random()
+                if prev_hue[0] is None or min(abs(h - prev_hue[0]), 1.0 - abs(h - prev_hue[0])) >= 0.2:
+                    break
+            prev_hue[0] = h
+            r, g, b = colorsys.hsv_to_rgb(h, 1.0, 1.0)
             self.configure(bg=f"#{int(r * 255):02x}{int(g * 255):02x}{int(b * 255):02x}")
-            self.after(150, step)
+            beat[0] += 1
+            next_ms = max(0, round((start + beat[0] * interval_s - time.monotonic()) * 1000))
+            self.after(next_ms, step)
 
         step()
+
+    def _stop_dance_effects(self) -> None:
+        self._dvd_logo_active = False
+        self._border_rainbow_active = False
+        self._konami_permanently_hidden = True
+        if self._dance_flash_cancel is not None:
+            self._dance_flash_cancel()
+            self._dance_flash_cancel = None
+        if self._dance_go_back is not None:
+            go_back = self._dance_go_back
+            self._dance_go_back = None
+            go_back()
 
     def _header(self, parent: tk.Misc, subtitle: str = "") -> tk.Frame:
         header = tk.Frame(parent, bg=ACCENT2, padx=20, pady=14)
@@ -1063,6 +1154,7 @@ class UpdaterApp(tk.Tk):
 
             button_row = tk.Frame(frame, bg=DARK_BG)
             button_row.pack(fill="x", padx=20, pady=12)
+            self._register_konami_button_row(button_row)
             self._secondary_button(button_row, "Close", self._on_close).pack(side="right", padx=(10, 0))
             self._primary_button(button_row, "Next  →", self._confirm_folder).pack(side="right")
             return frame
@@ -1127,6 +1219,13 @@ class UpdaterApp(tk.Tk):
                 for entry in versions_data.get("versions", [])
             ]
 
+            # Fetch overrides eagerly so we know which folders will be touched.
+            try:
+                self.override_zip = fetch_overrides_zip()
+            except Exception:
+                self.override_zip = None
+            self.override_folders = get_override_folders(self.override_zip) if self.override_zip else []
+
             if not self.latest_version:
                 self.after(0, lambda: self._show_outcome(
                     success=False,
@@ -1162,9 +1261,7 @@ class UpdaterApp(tk.Tk):
             ).pack()
             button_row = tk.Frame(frame, bg=DARK_BG)
             button_row.pack(fill="x", padx=20, pady=12)
-            self._konami_button_row = button_row
-            if self._konami_unlocked:
-                self._add_dance_button(button_row)
+            self._register_konami_button_row(button_row)
             self._secondary_button(
                 button_row, "Choose version…", self._show_version_options,
             ).pack(side="right", padx=(10, 0))
@@ -1257,28 +1354,46 @@ class UpdaterApp(tk.Tk):
                     font=FONT_MONO, bg=DARK_BG, fg=TEXT_DIM,
                 ).pack(side="left")
 
+            wipe_folders = list(dict.fromkeys(CATEGORY_DIRS + self.override_folders))
+            folder_list  = ", ".join(f"{name}/" for name in wipe_folders)
+
             fresh_var = tk.BooleanVar(value=self.fresh_install or not self.local_version)
             fresh_row = tk.Frame(body, bg=DARK_BG)
             fresh_row.pack(fill="x", pady=(12, 4))
             if not self.local_version:
                 tk.Label(
                     fresh_row,
-                    text="⚠  Installing this modpack will clear the mods/ folder in your selected directory.",
+                    text=f"⚠  Installing this modpack will clear: {folder_list}",
                     font=FONT_BODY, bg=DARK_BG, fg=YELLOW,
                     wraplength=560, justify="left",
                 ).pack(anchor="w")
             else:
                 malformed = _bare_version(self.local_version) == "?"
-                tk.Checkbutton(
-                    fresh_row,
-                    text="Fresh install  (deletes all existing mods and re-downloads everything)",
-                    variable=fresh_var, font=FONT_BODY,
-                    bg=DARK_BG, fg=TEXT_DIM if malformed else TEXT,
-                    selectcolor=PANEL_BG,
-                    activebackground=DARK_BG, activeforeground=TEXT,
+                fresh_inner = tk.Frame(fresh_row, bg=DARK_BG)
+                fresh_inner.pack(anchor="w", fill="x", padx=(8, 0))
+                fresh_cb = tk.Checkbutton(
+                    fresh_inner, variable=fresh_var,
+                    bg=DARK_BG, selectcolor=YELLOW,
+                    activebackground=DARK_BG,
                     disabledforeground=TEXT_DIM,
                     state="disabled" if malformed else "normal",
-                ).pack(anchor="w")
+                    relief="flat", bd=0,
+                )
+                fresh_cb.pack(side="left", anchor="w")
+                fresh_lbl = tk.Label(
+                    fresh_inner,
+                    text=f"Fresh install  (deletes everything in {folder_list} and reinstalls from scratch)",
+                    font=FONT_BODY, bg=DARK_BG,
+                    fg=TEXT_DIM if malformed else TEXT,
+                    wraplength=560, justify="left", anchor="nw",
+                )
+                fresh_lbl.pack(side="left", fill="x", expand=True, anchor="nw")
+                if not malformed:
+                    fresh_lbl.config(cursor="hand2")
+                    fresh_lbl.bind("<Button-1>", lambda _: fresh_var.set(not fresh_var.get()))
+                    def _on_fresh_change(*_) -> None:
+                        fresh_lbl.config(fg=YELLOW if fresh_var.get() else TEXT)
+                    fresh_var.trace_add("write", _on_fresh_change)
 
             if self.local_version:
                 tk.Label(
@@ -1301,6 +1416,7 @@ class UpdaterApp(tk.Tk):
 
             button_row = tk.Frame(frame, bg=DARK_BG)
             button_row.pack(fill="x", padx=20, pady=12)
+            self._register_konami_button_row(button_row)
             self._secondary_button(button_row, "Cancel", self._on_close).pack(side="right", padx=(10, 0))
             self._primary_button(button_row, "Continue  →", confirm).pack(side="right")
             return frame
@@ -1368,66 +1484,27 @@ class UpdaterApp(tk.Tk):
             )
             self._header(frame, subtitle=f"{from_label}  →  v{self.target_version}")
 
-            # On fresh install, show existing files that Phase 0 will wipe.
-            existing_files: list[str] = []
-            if self.fresh_install and self.modpack_dir is not None:
-                for category in ("mods", "shaderpacks", "resourcepacks"):
-                    category_dir = self.modpack_dir / category
-                    if category_dir.is_dir():
-                        for f in sorted(category_dir.iterdir(), key=lambda p: p.name.lower()):
-                            existing_files.append(f.name)
+            reset_var = tk.BooleanVar(value=False)
 
-            changes:       dict      = {}
-            added_names:   list[str] = []
-            updated_names: list[str] = []
-            removed_names: list[str] = []
-            if self.fresh_install:
-                changes     = diff_snapshots(self.old_snapshot, self.new_snapshot)
-                num_added   = len(changes["added"])
-                num_updated = 0
-                num_removed = len(existing_files)
-            else:
-                _plan         = self.update_plan
-                added_names   = sorted([name for _, _, name, is_upd in _plan["download"] if not is_upd], key=str.lower)
-                updated_names = sorted([name for _, _, name, is_upd in _plan["download"] if is_upd], key=str.lower)
-                removed_names = sorted([name for _, name in _plan["delete"]], key=str.lower)
-                num_added   = len(added_names)
-                num_updated = len(updated_names)
-                num_removed = len(removed_names)
+            def _rebuild_plan_with_wipes() -> dict:
+                """Build a fresh plan that reflects current fresh_install + reset_overrides state."""
+                assert self.modpack_dir is not None
+                plan = build_update_plan(self.old_snapshot, self.new_snapshot, self.modpack_dir)
+                if self.fresh_install:
+                    plan["delete"].extend(
+                        collect_wipe_targets(
+                            self.modpack_dir,
+                            list(dict.fromkeys(CATEGORY_DIRS + self.override_folders)),
+                        )
+                    )
+                elif reset_var.get():
+                    plan["delete"].extend(
+                        collect_wipe_targets(self.modpack_dir, self.override_folders)
+                    )
+                return plan
 
             stats_row = tk.Frame(frame, bg=DARK_BG)
             stats_row.pack()
-            if self.fresh_install:
-                stat_items = (
-                    (str(num_added),   GREEN),
-                    (" to download",   TEXT_DIM),
-                    ("  ·  ",          TEXT_DIM),
-                    (str(num_removed), RED),
-                    (" to delete",     TEXT_DIM),
-                )
-            else:
-                stat_items = (
-                    (str(num_added),   GREEN),
-                    (" added",         TEXT_DIM),
-                    ("  ·  ",          TEXT_DIM),
-                    (str(num_removed), RED),
-                    (" removed",       TEXT_DIM),
-                    ("  ·  ",          TEXT_DIM),
-                    (str(num_updated), YELLOW),
-                    (" updated",       TEXT_DIM),
-                )
-            for label_text, colour in stat_items:
-                tk.Label(
-                    stats_row, text=label_text,
-                    font=FONT_BODY, bg=DARK_BG, fg=colour, pady=8,
-                ).pack(side="left")
-
-            if self.release_message:
-                tk.Label(
-                    frame, text=self.release_message,
-                    font=FONT_BODY, bg=DARK_BG, fg=TEXT_DIM,
-                    wraplength=560, justify="left",
-                ).pack(fill="x", padx=20, pady=(0, 8))
 
             text_frame = tk.Frame(frame, bg=PANEL_BG)
             text_frame.pack(fill="both", expand=True, padx=20, pady=(0, 10))
@@ -1446,73 +1523,172 @@ class UpdaterApp(tk.Tk):
             text.tag_config("section_added",   font=FONT_BOLD,        foreground=GREEN)
             text.tag_config("section_removed", font=FONT_BOLD,        foreground=RED)
             text.tag_config("section_updated", font=FONT_BOLD,        foreground=YELLOW)
+            text.tag_config("folder",          font=FONT_BOLD,        foreground=TEXT)
             text.tag_config("added",           font=FONT_MONO,        foreground=GREEN)
             text.tag_config("removed",         font=FONT_MONO,        foreground=RED)
             text.tag_config("updated",         font=FONT_MONO,        foreground=YELLOW)
             text.tag_config("dim",             font=FONT_MONO,        foreground=TEXT_DIM)
             text.tag_config("placeholder",     font=FONT_MONO_ITALIC, foreground=TEXT_DIM)
 
-            text.config(state="normal")
+            def _render() -> None:
+                assert self.modpack_dir is not None
+                self.update_plan = _rebuild_plan_with_wipes()
+                _plan         = self.update_plan
+                added_names   = sorted([name for _, _, name, is_upd in _plan["download"] if not is_upd], key=str.lower)
+                updated_names = sorted([name for _, _, name, is_upd in _plan["download"] if is_upd], key=str.lower)
+                _updated_set  = set(updated_names)
+                removed_entries = [(p, name) for p, name in _plan["delete"] if name not in _updated_set]
+                num_added   = len(added_names)
+                num_updated = len(updated_names)
+                num_removed = len(removed_entries)
 
-            if self.fresh_install:
-                text.insert("end", "To Download\n", "section_added")
-                text.insert("end", "\n")
-                if changes["added"]:
-                    for _, entry in changes["added"]:
-                        text.insert("end", f"  - {entry['name']}\n", "added")
+                # Stats row
+                for child in stats_row.winfo_children():
+                    child.destroy()
+                if self.fresh_install:
+                    stat_items = (
+                        (str(num_added),   GREEN),
+                        (" to download",   TEXT_DIM),
+                        ("  ·  ",          TEXT_DIM),
+                        (str(num_removed), RED),
+                        (" to delete",     TEXT_DIM),
+                    )
                 else:
-                    text.insert("end", "  No mods to download.\n", "placeholder")
-                text.insert("end", "\n")
+                    stat_items = (
+                        (str(num_added),   GREEN),
+                        (" added",         TEXT_DIM),
+                        ("  ·  ",          TEXT_DIM),
+                        (str(num_removed), RED),
+                        (" removed",       TEXT_DIM),
+                        ("  ·  ",          TEXT_DIM),
+                        (str(num_updated), YELLOW),
+                        (" updated",       TEXT_DIM),
+                    )
+                for label_text, colour in stat_items:
+                    tk.Label(
+                        stats_row, text=label_text,
+                        font=FONT_BODY, bg=DARK_BG, fg=colour, pady=8,
+                    ).pack(side="left")
 
-                text.insert("end", "To Delete\n", "section_removed")
-                text.insert("end", "\n")
-                if existing_files:
-                    for filename in existing_files:
-                        text.insert("end", f"  - {filename}\n", "removed")
+                # Body
+                text.config(state="normal")
+                text.delete("1.0", "end")
+
+                if self.fresh_install:
+                    text.insert("end", "To Download\n", "section_added")
+                    text.insert("end", "\n")
+                    changes = diff_snapshots(self.old_snapshot, self.new_snapshot)
+                    if changes["added"]:
+                        for _, entry in changes["added"]:
+                            text.insert("end", f"  + {entry['name']}\n", "added")
+                    else:
+                        text.insert("end", "  Nothing to download.\n", "placeholder")
+                    text.insert("end", "\n")
+
+                    text.insert("end", "To Delete\n", "section_removed")
+                    text.insert("end", "\n")
+                    if removed_entries:
+                        grouped = group_deletes_by_folder(removed_entries, self.modpack_dir)
+                        for folder in sorted(grouped):
+                            if folder:
+                                text.insert("end", f"  {folder}\n", "folder")
+                                for name in sorted(grouped[folder], key=str.lower):
+                                    text.insert("end", f"    |_ {name}\n", "removed")
+                            else:
+                                for name in sorted(grouped[folder], key=str.lower):
+                                    text.insert("end", f"  - {name}\n", "removed")
+                    else:
+                        text.insert("end", "  Nothing to delete.\n", "placeholder")
                 else:
-                    text.insert("end", "  No existing files to delete.\n", "placeholder")
-            else:
-                text.insert("end", "Added\n", "section_added")
-                text.insert("end", "\n")
-                if added_names:
-                    for name in added_names:
-                        text.insert("end", f"  - {name}\n", "added")
+                    text.insert("end", "Added\n", "section_added")
+                    text.insert("end", "\n")
+                    if added_names:
+                        for name in added_names:
+                            text.insert("end", f"  + {name}\n", "added")
+                    else:
+                        text.insert("end", "  No files added.\n", "placeholder")
+                    text.insert("end", "\n")
+
+                    text.insert("end", "Removed\n", "section_removed")
+                    text.insert("end", "\n")
+                    if removed_entries:
+                        grouped = group_deletes_by_folder(removed_entries, self.modpack_dir)
+                        for folder in sorted(grouped):
+                            if folder:
+                                text.insert("end", f"  {folder}\n", "folder")
+                                for name in sorted(grouped[folder], key=str.lower):
+                                    text.insert("end", f"    |_ {name}\n", "removed")
+                            else:
+                                for name in sorted(grouped[folder], key=str.lower):
+                                    text.insert("end", f"  - {name}\n", "removed")
+                    else:
+                        text.insert("end", "  No files removed.\n", "placeholder")
+                    text.insert("end", "\n")
+
+                    text.insert("end", "Updated\n", "section_updated")
+                    text.insert("end", "\n")
+                    if updated_names:
+                        for name in updated_names:
+                            text.insert("end", f"  ~ {name}\n", "updated")
+                    else:
+                        text.insert("end", "  No files updated.\n", "placeholder")
+
+                text.config(state="disabled")
+
+            if self.release_message:
+                tk.Label(
+                    frame, text=self.release_message,
+                    font=FONT_BODY, bg=DARK_BG, fg=TEXT_DIM,
+                    wraplength=560, justify="left",
+                ).pack(fill="x", padx=20, pady=(0, 8))
+
+            # "Reset overrides" toggle — hidden during fresh install (already wipes overrides).
+            if not self.fresh_install:
+                reset_row = tk.Frame(frame, bg=DARK_BG, padx=20)
+                reset_row.pack(fill="x", pady=(4, 0))
+                override_list = ", ".join(f"{name}/" for name in self.override_folders)
+                if not self.override_folders:
+                    reset_text  = "Reset overrides  (no override folders in this modpack)"
+                    reset_state = "disabled"
                 else:
-                    text.insert("end", "  No mods added.\n", "placeholder")
-                text.insert("end", "\n")
-
-                text.insert("end", "Removed\n", "section_removed")
-                text.insert("end", "\n")
-                if removed_names:
-                    for name in removed_names:
-                        text.insert("end", f"  - {name}\n", "removed")
-                else:
-                    text.insert("end", "  No mods removed.\n", "placeholder")
-                text.insert("end", "\n")
-
-                text.insert("end", "Updated\n", "section_updated")
-                text.insert("end", "\n")
-                if updated_names:
-                    for name in updated_names:
-                        text.insert("end", f"  - {name}\n", "updated")
-                else:
-                    text.insert("end", "  No mods updated.\n", "placeholder")
-
-            text.config(state="disabled")
-
-            reset_var = tk.BooleanVar(value=False)
-            reset_row = tk.Frame(frame, bg=DARK_BG, padx=20)
-            reset_row.pack(fill="x", pady=(4, 0))
-            tk.Checkbutton(
-                reset_row,
-                text="Reset config files to defaults  (overwrites your existing settings)",
-                variable=reset_var, font=FONT_BODY,
-                bg=DARK_BG, fg=TEXT_DIM, selectcolor=PANEL_BG,
-                activebackground=DARK_BG, activeforeground=TEXT,
-            ).pack(anchor="w")
+                    reset_text  = (
+                        f"Reset overrides  (wipes and re-extracts {override_list}"
+                        " — discards your edits to config files and similar)"
+                    )
+                    reset_state = "normal"
+                reset_inner = tk.Frame(reset_row, bg=DARK_BG)
+                reset_inner.pack(anchor="w", fill="x", padx=(8, 0))
+                reset_cb = tk.Checkbutton(
+                    reset_inner, variable=reset_var,
+                    bg=DARK_BG, selectcolor=YELLOW,
+                    activebackground=DARK_BG,
+                    disabledforeground=TEXT_DIM,
+                    state=reset_state,
+                    relief="flat", bd=0,
+                )
+                reset_cb.pack(side="left", anchor="w")
+                reset_lbl = tk.Label(
+                    reset_inner,
+                    text=reset_text,
+                    font=FONT_BODY, bg=DARK_BG, fg=TEXT_DIM,
+                    wraplength=560, justify="left", anchor="nw",
+                )
+                reset_lbl.pack(side="left", fill="x", expand=True, anchor="nw")
+                if reset_state == "normal":
+                    reset_lbl.config(cursor="hand2")
+                    def _on_reset_cb_command() -> None:
+                        _render()
+                        reset_lbl.config(fg=YELLOW if reset_var.get() else TEXT_DIM)
+                    reset_cb.config(command=_on_reset_cb_command)
+                    def _on_reset_lbl_click(_) -> None:
+                        reset_var.set(not reset_var.get())
+                        _render()
+                        reset_lbl.config(fg=YELLOW if reset_var.get() else TEXT_DIM)
+                    reset_lbl.bind("<Button-1>", _on_reset_lbl_click)
 
             button_row = tk.Frame(frame, bg=DARK_BG)
             button_row.pack(fill="x", padx=20, pady=12)
+            self._register_konami_button_row(button_row)
             self._secondary_button(button_row, "Cancel", self._on_close).pack(side="right", padx=(10, 0))
             self._secondary_button(
                 button_row, "←  Back", self._show_version_options,
@@ -1520,10 +1696,12 @@ class UpdaterApp(tk.Tk):
             confirm_label = "Confirm & Reset  →" if self.fresh_install else "Confirm & Update  →"
 
             def _confirm() -> None:
-                self.reset_configs = reset_var.get()
+                self.reset_overrides = reset_var.get()
                 self._show_updating()
 
             self._primary_button(button_row, confirm_label, _confirm).pack(side="right")
+
+            _render()
             return frame
         self._swap_frame(build)
 
@@ -1568,6 +1746,7 @@ class UpdaterApp(tk.Tk):
             button_row = tk.Frame(frame, bg=DARK_BG)
             button_row.pack(fill="x", padx=20, pady=12)
             self._update_button_row = button_row
+            self._register_konami_button_row(button_row)
             return frame
         self._swap_frame(build)
         threading.Thread(target=self._run_update, daemon=True).start()
@@ -1599,23 +1778,12 @@ class UpdaterApp(tk.Tk):
 
             downloads = self.update_plan["download"]
             deletions = self.update_plan["delete"]
-            downloaded_files: list[tuple[Path, str, bool]] = []
+            updated_names = {name for _, _, name, is_upd in downloads if is_upd}
+            downloaded_files: list[tuple[Path, str, bool, str]] = []
             failed_downloads: list[str] = []
 
-            # Phase 0 (fresh install only): wipe all existing mod files
-            if self.fresh_install:
-                self._set_progress("Clearing existing mods…")
-                for category in ("mods", "shaderpacks", "resourcepacks"):
-                    category_dir = self.modpack_dir / category
-                    if category_dir.is_dir():
-                        for existing_file in list(category_dir.iterdir()):
-                            try:
-                                existing_file.unlink()
-                                self._log(f"  - {existing_file.name}", "log_remove")
-                            except OSError as exc:
-                                self._log(f"  [warn] could not delete {existing_file.name}: {exc}", "log_warn")
-
-            # Phase 1: download all new/updated files concurrently
+            # Phase 1: download all new/updated files concurrently — kept atomic so a
+            # mid-download failure doesn't leave the user with deleted files.
             completed_count = 0
             count_lock = threading.Lock()
             if downloads:
@@ -1637,7 +1805,7 @@ class UpdaterApp(tk.Tk):
                         self._log(f"  [FAIL] {display_name}", "log_error")
                         continue
                     category = classify_downloaded_file(local_path)
-                    downloaded_files.append((local_path, category, is_update))
+                    downloaded_files.append((local_path, category, is_update, display_name))
                     self._log(f"  ↓ {display_name}", "log_download")
 
             if failed_downloads:
@@ -1654,20 +1822,22 @@ class UpdaterApp(tk.Tk):
                 ))
                 return
 
-            # Phase 2: delete old files (skipped for fresh install — already wiped in phase 0)
-            if not self.fresh_install:
-                self._set_progress("Applying changes…")
+            # Phase 2: delete every queued file (incremental old files + any wiped
+            # category/override folder contents collected during _show_changelog).
+            if deletions:
+                self._set_progress("Removing files…")
                 self._log("")
                 for old_path, display_name in deletions:
                     try:
                         old_path.unlink()
-                        self._log(f"  - {display_name}", "log_remove")
+                        if display_name not in updated_names:
+                            self._log(f"  - {display_name}", "log_remove")
                     except OSError as exc:
                         self._log(f"  [warn] could not delete {display_name}: {exc}", "log_warn")
 
             # Phase 3: move downloaded files into place
             self._set_progress("Installing files…")
-            for tmp_path, category, is_update in downloaded_files:
+            for tmp_path, category, is_update, display_name in downloaded_files:
                 dest_dir = self.modpack_dir / category
                 dest_dir.mkdir(parents=True, exist_ok=True)
                 destination = dest_dir / tmp_path.name
@@ -1676,21 +1846,26 @@ class UpdaterApp(tk.Tk):
                 try:
                     shutil.move(str(tmp_path), str(destination))
                     icon = "~" if is_update else "+"
-                    self._log(f"  {icon} {destination.name}", "log_update" if is_update else "log_add")
+                    self._log(f"  {icon} {display_name}", "log_update" if is_update else "log_add")
                 except OSError as exc:
                     self._log(f"  [warn] could not install {tmp_path.name}: {exc}", "log_warn")
 
             # Phase 4: apply overrides
-            # reset_configs=True overwrites existing files; False adds only missing ones.
+            # overwrite=True extracts everything; False adds only missing files.
             self._set_progress("Applying overrides…")
-            try:
-                override_zip = fetch_overrides_zip()
-            except Exception:
-                override_zip = None
+            # Wiped folders (fresh or reset_overrides) get a full re-extract; otherwise add new files only.
+            overwrite = self.fresh_install or self.reset_overrides
+            # Re-fetch only if we didn't already cache the bytes during _run_check.
+            override_zip = self.override_zip
+            if override_zip is None:
+                try:
+                    override_zip = fetch_overrides_zip()
+                except Exception:
+                    override_zip = None
             if override_zip:
                 applied = apply_overrides_zip(
                     self.modpack_dir, override_zip,
-                    new_files_only=not self.reset_configs,
+                    new_files_only=not overwrite,
                 )
                 for rel_path in applied:
                     self._log(f"  + {rel_path}", "log_add")
@@ -1727,9 +1902,7 @@ class UpdaterApp(tk.Tk):
             def add_finish_button() -> None:
                 self._primary_button(button_row, "Finish", self._on_close).pack(side="right")
                 if success:
-                    self._konami_button_row = button_row
-                    if self._konami_unlocked:
-                        self._add_dance_button(button_row)
+                    self._register_konami_button_row(button_row)
                 if self._log_text is not None:
                     self.update_idletasks()
                     self._log_text.see("end")
@@ -1757,9 +1930,7 @@ class UpdaterApp(tk.Tk):
                 ).pack()
                 btn_row = tk.Frame(frame, bg=DARK_BG)
                 btn_row.pack(fill="x", padx=20, pady=12)
-                self._konami_button_row = btn_row
-                if self._konami_unlocked:
-                    self._add_dance_button(btn_row)
+                self._register_konami_button_row(btn_row)
                 self._primary_button(btn_row, "Close", self._on_close).pack(side="right")
                 return frame
             self._current_builder = _outcome_builder
@@ -1782,6 +1953,7 @@ class UpdaterApp(tk.Tk):
                 ).pack()
                 button_row = tk.Frame(frame, bg=DARK_BG)
                 button_row.pack(fill="x", padx=20, pady=12)
+                self._register_konami_button_row(button_row)
                 self._primary_button(button_row, "Close", self._on_close).pack(side="right")
                 return frame
             self._swap_frame(build)
@@ -1800,6 +1972,8 @@ class UpdaterApp(tk.Tk):
             self._konami_progress = 1 if event.keysym == _KONAMI_SEQUENCE[0] else 0
 
     def _on_konami_complete(self) -> None:
+        if self._konami_permanently_hidden:
+            return
         self._konami_unlocked = True
         if self._konami_button_row is not None:
             try:
@@ -1807,7 +1981,23 @@ class UpdaterApp(tk.Tk):
             except tk.TclError:
                 pass
 
+    def _register_konami_button_row(self, button_row: tk.Frame) -> None:
+        """Register a page's button row as the konami target and pre-add the dance
+        button if the code has already been unlocked. Lets every page expose the
+        easter egg instead of only the finished/up-to-date screens."""
+        if self._konami_permanently_hidden:
+            return
+        self._konami_button_row = button_row
+        if self._konami_unlocked:
+            try:
+                self._add_dance_button(button_row)
+            except tk.TclError:
+                pass
+
     def _add_dance_button(self, button_row: tk.Frame) -> None:
+        if getattr(button_row, "_dance_button_added", False):
+            return
+        button_row._dance_button_added = True  # type: ignore[attr-defined]
         tk.Button(
             button_row, text="Dance? 🎵",
             font=FONT_BODY, bg=KONAMI, fg="white",
@@ -1816,15 +2006,116 @@ class UpdaterApp(tk.Tk):
             command=self._show_dance,
         ).pack(side="left")
 
+    # ---- easter egg: beat-drop timer + DVD logo bounce ----
+
+    def _schedule_beat_drop(self, countdown_var: tk.StringVar, countdown_label: tk.Label, on_drop=None) -> None:
+        """
+        Poll until the audio actually starts, then count down beat_drop seconds.
+        When the timer hits zero, hide the label and start the DVD-logo bounce
+        (which persists across pages until the program is closed).
+        """
+        def tick() -> None:
+            try:
+                if not countdown_label.winfo_exists():
+                    return
+                start = self._dance_audio_start
+                if start is None:
+                    countdown_var.set("…")
+                    self.after(100, tick)
+                    return
+                remaining = _BEAT_DROP_SECONDS - (time.monotonic() - start)
+                if remaining <= 0:
+                    countdown_var.set("")
+                    self._start_dvd_logo_bounce()
+                    if on_drop is not None:
+                        on_drop()
+                    return
+                countdown_var.set(f"{remaining:.1f}s")
+                self.after(50, tick)
+            except tk.TclError:
+                pass
+
+        if _BEAT_DROP_SECONDS <= 0:
+            countdown_var.set("")
+            self._start_dvd_logo_bounce()
+            if on_drop is not None:
+                on_drop()
+            return
+        self.after(50, tick)
+
+    def _start_dvd_logo_bounce(self) -> None:
+        """
+        Move the window around the virtual desktop like a DVD-logo screensaver.
+        Bounces off the outermost edges of all monitors (treated as one bounded box).
+        Continues until the program is closed.
+        """
+        if self._dvd_logo_active:
+            return
+        self._dvd_logo_active = True
+
+        velocity = {
+            "vx": random.choice([-4, 4]),
+            "vy": random.choice([-3, 3]),
+        }
+        interval_s = 0.008
+        start = time.monotonic()
+        tick = [0]
+
+        def step() -> None:
+            if not self._dvd_logo_active:
+                return
+            try:
+                self.update_idletasks()
+                w = self.winfo_width()
+                h = self.winfo_height()
+                x = self.winfo_x()
+                y = self.winfo_y()
+                # Virtual root spans all monitors on Windows / X11.
+                x_min = self.winfo_vrootx()
+                y_min = self.winfo_vrooty()
+                x_max = x_min + self.winfo_vrootwidth()
+                y_max = y_min + self.winfo_vrootheight()
+
+                new_x = x + velocity["vx"]
+                new_y = y + velocity["vy"]
+
+                if new_x < x_min:
+                    new_x = x_min
+                    velocity["vx"] = abs(velocity["vx"])
+                elif new_x + w > x_max:
+                    new_x = x_max - w
+                    velocity["vx"] = -abs(velocity["vx"])
+
+                if new_y < y_min:
+                    new_y = y_min
+                    velocity["vy"] = abs(velocity["vy"])
+                elif new_y + h > y_max:
+                    new_y = y_max - h
+                    velocity["vy"] = -abs(velocity["vy"])
+
+                self.geometry(f"+{new_x}+{new_y}")
+                tick[0] += 1
+                next_ms = max(0, round((start + tick[0] * interval_s - time.monotonic()) * 1000))
+                self.after(next_ms, step)
+            except tk.TclError:
+                self._dvd_logo_active = False
+
+        self.after(0, step)
+
     def _show_dance(self) -> None:
         self._dance_visited = True
         previous_builder = self._current_builder
 
         def go_back() -> None:
+            self._dvd_logo_active = False
+            self._dance_go_back = None
+            self._konami_permanently_hidden = True
             if previous_builder is not None:
                 self._swap_frame(previous_builder)
             else:
                 self._on_close()
+
+        self._dance_go_back = go_back
 
         def add_header_with_question(frame: tk.Frame) -> None:
             self._header(frame)
@@ -1840,15 +2131,34 @@ class UpdaterApp(tk.Tk):
 
         def start_rainbow_flash(frame: tk.Frame, body: tk.Frame) -> None:
             after_id: list[str | None] = [None]
+            interval_s = 60.0 / _RAINBOW_BPM
+            start = time.monotonic()
+            beat = [0]
+            prev_hue: list[float | None] = [None]
 
             def step() -> None:
-                r, g, b = colorsys.hsv_to_rgb(random.random(), 1.0, 1.0)
+                while True:
+                    h = random.random()
+                    if prev_hue[0] is None or min(abs(h - prev_hue[0]), 1.0 - abs(h - prev_hue[0])) >= 0.2:
+                        break
+                prev_hue[0] = h
+                r, g, b = colorsys.hsv_to_rgb(h, 1.0, 1.0)
                 color = f"#{int(r * 255):02x}{int(g * 255):02x}{int(b * 255):02x}"
                 try:
                     body.configure(bg=color)
-                    after_id[0] = frame.after(150, step)
+                    beat[0] += 1
+                    next_ms = max(0, round((start + beat[0] * interval_s - time.monotonic()) * 1000))
+                    after_id[0] = frame.after(next_ms, step)
                 except tk.TclError:
                     pass
+
+            def cancel() -> None:
+                if after_id[0] is not None:
+                    with contextlib.suppress(tk.TclError):
+                        frame.after_cancel(after_id[0])
+                with contextlib.suppress(tk.TclError):
+                    body.configure(bg="black")
+            self._dance_flash_cancel = cancel
 
             def on_destroy(event: tk.Event) -> None:
                 if event.widget is frame and after_id[0] is not None:
@@ -1897,14 +2207,32 @@ class UpdaterApp(tk.Tk):
 
                 frame = tk.Frame(self, bg=DARK_BG)
                 add_header_with_question(frame)
-                add_back_button(frame)
+
+                # Back button row packed bottom-first (reserves layout space).
+                # The button itself is added only when the beat drop fires.
+                back_row = tk.Frame(frame, bg=DARK_BG)
+                back_row.pack(fill="x", padx=20, pady=12, side="bottom")
 
                 body = tk.Frame(frame, bg="black")
                 body.pack(fill="both", expand=True)
                 display = tk.Label(body, bg="black")
                 display.pack(fill="both", expand=True, padx=8, pady=8)
-                if _ENABLE_RAINBOW:
-                    start_rainbow_flash(frame, body)
+
+                # Countdown to the beat drop, overlaid in the top-right of the player.
+                # Once it hits zero the DVD-logo bounce kicks in for the rest of the session.
+                countdown_var = tk.StringVar(value="")
+                countdown_label = tk.Label(
+                    body, textvariable=countdown_var,
+                    font=FONT_TITLE, bg="black", fg=KONAMI,
+                )
+                countdown_label.place(relx=1.0, x=-16, y=12, anchor="ne")
+
+                def on_drop() -> None:
+                    self._secondary_button(back_row, "← Back", go_back).pack(side="right")
+                    if _ENABLE_RAINBOW:
+                        start_rainbow_flash(frame, body)
+
+                self._schedule_beat_drop(countdown_var, countdown_label, on_drop=on_drop)
 
                 photo_ref:     list[object]       = [None]
                 pending_frame: list[tuple | None] = [None]
@@ -1946,6 +2274,9 @@ class UpdaterApp(tk.Tk):
                             actual_start = time.monotonic()
                             self._dance_audio_start = actual_start
                             self._dance_start_time[0] = actual_start
+                            duration = _DANCE_CACHED_DURATION[0]
+                            if duration > 0:
+                                self.after(round(duration * 1000), self._stop_dance_effects)
 
                         threading.Thread(target=audio_starter, daemon=True).start()
 

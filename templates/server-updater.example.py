@@ -49,6 +49,10 @@ if "__" in MODPACK_NAME:
 
 HEADERS = {"User-Agent": f"{GITHUB_REPO}-server-updater/1.0"}
 
+# Top-level category folders the server installs directly (mods only on the server side).
+# Shaderpacks and resourcepacks are stripped by filter_for_server.
+CATEGORY_DIRS: list[str] = ["mods"]
+
 
 # -------------------------
 # PREFS  (remembers the server directory between runs)
@@ -187,6 +191,36 @@ def apply_overrides_zip(install_dir: Path, zip_bytes: bytes, new_files_only: boo
                 shutil.copyfileobj(src, dst)
             applied.append(member.filename)
     return applied
+
+
+def get_override_folders(override_zip: bytes) -> list[str]:
+    """Return sorted top-level folder names contained in the overrides zip."""
+    folders: set[str] = set()
+    try:
+        with zipfile.ZipFile(io.BytesIO(override_zip)) as zf:
+            for name in zf.namelist():
+                head, sep, _ = name.partition("/")
+                if sep and head:
+                    folders.add(head)
+    except zipfile.BadZipFile:
+        pass
+    return sorted(folders)
+
+
+def collect_wipe_targets(install_dir: Path, folder_names: list[str]) -> list[tuple[Path, str]]:
+    """
+    For each folder name in folder_names, walk install_dir/folder_name and collect every file.
+    Returns a list of (file_path, display_name) tuples where display_name is the filename.
+    """
+    targets: list[tuple[Path, str]] = []
+    for folder_name in folder_names:
+        folder_path = install_dir / folder_name
+        if not folder_path.is_dir():
+            continue
+        for file_path in folder_path.rglob("*"):
+            if file_path.is_file():
+                targets.append((file_path, file_path.name))
+    return targets
 
 
 def locate_existing_file(project_id: str, entry: dict, mods_dir: Path) -> Path | None:
@@ -339,11 +373,43 @@ def build_update_plan(old_snapshot: dict, new_snapshot: dict, mods_dir: Path) ->
 # DISPLAY HELPERS
 # -------------------------
 
+def _group_deletes_by_folder(
+    deletes: list[tuple[Path, str]],
+    install_dir: Path,
+) -> dict[str, list[str]]:
+    """Group delete entries by their top-level folder under install_dir."""
+    grouped: dict[str, list[str]] = {}
+    for file_path, _ in deletes:
+        try:
+            rel = file_path.relative_to(install_dir)
+            parts = rel.parts
+            folder = parts[0] if len(parts) > 1 else ""
+            sub = "/".join(parts[1:]) if len(parts) > 1 else file_path.name
+        except ValueError:
+            folder = ""
+            sub = file_path.name
+        grouped.setdefault(folder, []).append(sub)
+    return grouped
+
+
+def print_delete_tree(deletes: list[tuple[Path, str]], install_dir: Path) -> None:
+    """Print a folder-grouped tree of files queued for deletion."""
+    grouped = _group_deletes_by_folder(deletes, install_dir)
+    for folder in sorted(grouped):
+        if folder:
+            print(f"    {folder}")
+            for name in sorted(grouped[folder], key=str.lower):
+                print(f"      |_ {name}")
+        else:
+            for name in sorted(grouped[folder], key=str.lower):
+                print(f"    - {name}")
+
+
 def print_changelog(
     old_snapshot: dict,
     new_snapshot: dict,
     fresh: bool = False,
-    mods_dir: Path | None = None,
+    install_dir: Path | None = None,
     plan: dict | None = None,
 ) -> None:
     """Print a human-readable changelog between two snapshots."""
@@ -357,42 +423,37 @@ def print_changelog(
         else:
             print("\n  To Download: (none)")
 
-        if plan is not None:
-            to_delete = sorted(name for _, name in plan["delete"])
-            if to_delete:
-                print(f"\n  To Delete ({len(to_delete)}):")
-                for name in to_delete:
+        if plan is not None and plan["delete"]:
+            print(f"\n  To Delete ({len(plan['delete'])}):")
+            if install_dir is not None:
+                print_delete_tree(plan["delete"], install_dir)
+            else:
+                for _, name in sorted(plan["delete"], key=lambda pair: pair[1].lower()):
                     print(f"    - {name}")
-            else:
-                print("\n  To Delete: (none)")
         else:
-            existing_files: list[str] = []
-            if mods_dir is not None and mods_dir.is_dir():
-                existing_files = sorted(f.name for f in mods_dir.iterdir() if f.is_file())
-            if existing_files:
-                print(f"\n  To Delete ({len(existing_files)}):")
-                for filename in existing_files:
-                    print(f"    - {filename}")
-            else:
-                print("\n  To Delete: (none)")
+            print("\n  To Delete: (none)")
     elif plan is not None:
-        added   = sorted([name for _, _, name, is_upd in plan["download"] if not is_upd], key=str.lower)
-        removed = sorted([name for _, name in plan["delete"]], key=str.lower)
-        updated = sorted([name for _, _, name, is_upd in plan["download"] if is_upd], key=str.lower)
+        added_names   = sorted([name for _, _, name, is_upd in plan["download"] if not is_upd], key=str.lower)
+        updated_names = sorted([name for _, _, name, is_upd in plan["download"] if is_upd], key=str.lower)
+        _updated_set  = set(updated_names)
+        removed_entries = [(p, name) for p, name in plan["delete"] if name not in _updated_set]
 
-        if added:
-            print(f"\n  Added ({len(added)}):")
-            for name in added:
+        if added_names:
+            print(f"\n  Added ({len(added_names)}):")
+            for name in added_names:
                 print(f"    + {name}")
-        if removed:
-            print(f"\n  Removed ({len(removed)}):")
-            for name in removed:
-                print(f"    - {name}")
-        if updated:
-            print(f"\n  Updated ({len(updated)}):")
-            for name in updated:
+        if removed_entries:
+            print(f"\n  Removed ({len(removed_entries)}):")
+            if install_dir is not None:
+                print_delete_tree(removed_entries, install_dir)
+            else:
+                for _, name in sorted(removed_entries, key=lambda pair: pair[1].lower()):
+                    print(f"    - {name}")
+        if updated_names:
+            print(f"\n  Updated ({len(updated_names)}):")
+            for name in updated_names:
                 print(f"    ~ {name}")
-        if not added and not removed and not updated:
+        if not added_names and not removed_entries and not updated_names:
             print("\n  No changes.")
     else:
         changes = diff_snapshots(old_snapshot, new_snapshot)
@@ -439,7 +500,7 @@ def main() -> None:
         dest="fresh",
         action="store_true",
         default=None,
-        help="Wipe existing mods and re-download everything clean.",
+        help="Wipe mods/ and every overrides folder, then reinstall everything from scratch.",
     )
     fresh_group.add_argument(
         "--no-fresh",
@@ -448,9 +509,9 @@ def main() -> None:
         help="Perform an incremental update (default unless no version is detected).",
     )
     parser.add_argument(
-        "--yes",
+        "--reset-overrides",
         action="store_true",
-        help="Skip confirmation prompt.",
+        help="Wipe and re-extract every overrides folder (config/, kubejs/, etc.). Ignored when --fresh is used.",
     )
     parser.add_argument(
         "--workers",
@@ -475,7 +536,7 @@ def main() -> None:
             try:
                 entered = input("Server directory: ").strip()
             except (EOFError, KeyboardInterrupt):
-                print("\nAborted.")
+                print("\n[ERROR] Aborted.")
                 sys.exit(0)
             if not entered:
                 print("[ERROR] No server directory provided.")
@@ -534,6 +595,17 @@ def main() -> None:
     if installed_version is not None and _bare_version(installed_version) == "?":
         fresh = True
 
+    # ---- Fetch overrides early so we know which folders are involved ----
+    override_zip: bytes | None = None
+    try:
+        override_zip = fetch_overrides_zip()
+    except Exception:
+        pass
+    override_folders: list[str] = get_override_folders(override_zip) if override_zip else []
+
+    # Folders wiped on fresh install: category dirs + override folders.
+    fresh_wipe_dirs = list(dict.fromkeys(CATEGORY_DIRS + override_folders))
+
     # ---- Print plan summary ----
     print(f"\n{MODPACK_NAME} Server Updater")
     print("=" * 40)
@@ -548,17 +620,23 @@ def main() -> None:
         print(f"  Mode      : incremental update")
     print(f"  Directory : {server_dir}")
 
+    folder_list = ", ".join(f"{name}/" for name in fresh_wipe_dirs)
     if not installed_version:
-        print("[WARN] Installing this modpack will clear the mods/ folder.")
+        if fresh_wipe_dirs:
+            print(f"[WARN] Installing this modpack will clear: {folder_list}")
+        else:
+            print("[WARN] Installing this modpack will clear the mods/ folder.")
     elif _bare_version(installed_version) == "?":
         print("[WARN] Installed version is unrecognized — proceeding as a fresh install.")
+        if fresh_wipe_dirs:
+            print(f"[WARN] The following folders will be cleared: {folder_list}")
 
     if installed_version == _bcc_version(target_version) and not fresh:
         print(f"\n[OK] Already on version {target_version}. Nothing to do.")
         sys.exit(0)
 
     # ---- Fetch snapshots ----
-    print(f"\nFetching snapshot for {target_version} ...")
+    print(f"\nFetching snapshot for v{target_version} ...")
     try:
         new_raw_snapshot = fetch_snapshot(target_commit)
     except Exception as error:
@@ -587,51 +665,58 @@ def main() -> None:
                 sys.exit(1)
             old_snapshot = filter_for_server(old_raw_snapshot, client_only_ids)
 
+    # ---- Reset overrides prompt (before changelog so it reflects the decision) ----
+    # Fresh install already wipes everything, so the override-reset choice only
+    # matters during incremental updates.
+    reset_overrides = bool(args.reset_overrides) and not fresh
+    if override_folders and not fresh and not reset_overrides:
+        override_list = ", ".join(f"{name}/" for name in override_folders)
+        reset_prompt = f"\nWould you like to reset overrides? The following folders will be wiped and re-extracted:\n{override_list}"
+        try:
+            ans = input(f"{reset_prompt} [y/N] ").strip().lower()
+            reset_overrides = ans in ("y", "yes")
+        except (EOFError, KeyboardInterrupt):
+            print("\n[ERROR] Aborted.")
+            sys.exit(0)
+
     # ---- Build plan ----
     mods_dir.mkdir(parents=True, exist_ok=True)
     plan = build_update_plan(old_snapshot, new_snapshot, mods_dir)
     if fresh:
-        for existing in mods_dir.iterdir():
-            if existing.is_file():
-                plan["delete"].append((existing, existing.stem))
+        for folder_name in fresh_wipe_dirs:
+            plan["delete"].extend(collect_wipe_targets(server_dir, [folder_name]))
+    elif reset_overrides:
+        plan["delete"].extend(collect_wipe_targets(server_dir, override_folders))
 
     # ---- Show changelog ----
     print("\nChanges:")
-    print_changelog(old_snapshot, new_snapshot, fresh=fresh, plan=plan)
+    print_changelog(old_snapshot, new_snapshot, fresh=fresh, plan=plan, install_dir=server_dir)
 
     if not plan["download"] and not plan["delete"]:
         print("\n[OK] Nothing to change.")
         write_installed_version(server_dir, target_version)
         sys.exit(0)
 
+    download_count = len(plan["download"])
+    delete_count   = len(plan["delete"])
     print(
-        f"\n  {len(plan['download'])} file(s) to download,"
-        f" {len(plan['delete'])} file(s) to remove."
+        f"\n  {download_count} file(s) to download,"
+        f" {delete_count} file(s) to remove."
     )
 
     # ---- Confirm ----
-    if not args.yes:
-        try:
-            answer = input("\nProceed? [y/N] ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            print("\nAborted.")
-            sys.exit(0)
-        if answer not in ("y", "yes"):
-            print("Aborted.")
-            sys.exit(0)
-
-    # ---- Override prompt ----
-    reset_configs = False
-    if not args.yes:
-        try:
-            ans = input("Reset config files to defaults? [y/N] ").strip().lower()
-            reset_configs = ans in ("y", "yes")
-        except (EOFError, KeyboardInterrupt):
-            print("\nAborted.")
-            sys.exit(0)
+    try:
+        answer = input("\nProceed? [y/N] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print("\n[ERROR] Aborted.")
+        sys.exit(0)
+    if answer not in ("y", "yes"):
+        print("[INFO] Aborted.")
+        sys.exit(0)
 
     # ---- Apply: download to temp, then atomic move ----
     failed_downloads: list[str] = []
+    updated_names = {name for _, _, name, is_upd in plan["download"] if is_upd}
 
     if plan["download"]:
         print(f"\nDownloading {len(plan['download'])} file(s) ...")
@@ -639,17 +724,18 @@ def main() -> None:
             tmp_dir = Path(tmp_str)
             downloaded: list[tuple[Path, str]] = []
 
-            def _download_one(task: tuple) -> tuple[str | None, str]:
-                project_id, file_id, display_name, _ = task
+            def _download_one(task: tuple) -> tuple[str | None, str, bool]:
+                project_id, file_id, display_name, is_update = task
                 local_path = download_mod_file(project_id, file_id, tmp_dir)
-                return (str(local_path) if local_path else None, display_name)
+                return (str(local_path) if local_path else None, display_name, is_update)
 
             with ThreadPoolExecutor(max_workers=args.workers) as executor:
                 futures = {executor.submit(_download_one, task): task for task in plan["download"]}
                 for future in as_completed(futures):
-                    local_str, display_name = future.result()
+                    local_str, display_name, is_update = future.result()
                     if local_str:
-                        print(f"  [+] {display_name}")
+                        icon = "[~]" if is_update else "[+]"
+                        print(f"  {icon} {display_name}")
                         downloaded.append((Path(local_str), display_name))
                     else:
                         print(f"  [FAIL] {display_name}")
@@ -663,7 +749,8 @@ def main() -> None:
             for file_path, display_name in plan["delete"]:
                 try:
                     file_path.unlink()
-                    print(f"  [-] {display_name}")
+                    if display_name not in updated_names:
+                        print(f"  [-] {display_name}")
                 except OSError as error:
                     print(f"  [WARN] Could not delete {file_path.name}: {error}")
 
@@ -674,27 +761,24 @@ def main() -> None:
         for file_path, display_name in plan["delete"]:
             try:
                 file_path.unlink()
-                print(f"  [-] {display_name}")
+                if display_name not in updated_names:
+                    print(f"  [-] {display_name}")
             except OSError as error:
                 print(f"  [WARN] Could not delete {file_path.name}: {error}")
 
     # ---- Apply overrides ----
-    # reset_configs=True overwrites existing files; False adds only missing ones.
-    override_zip: bytes | None = None
-    try:
-        override_zip = fetch_overrides_zip()
-    except Exception:
-        pass
+    # Wiped folders (fresh or reset_overrides) get a full re-extract; otherwise add new files only.
+    overwrite = fresh or reset_overrides
     if override_zip:
-        applied = apply_overrides_zip(server_dir, override_zip, new_files_only=not reset_configs)
+        applied = apply_overrides_zip(server_dir, override_zip, new_files_only=not overwrite)
         if applied:
-            label = "Resetting config files:" if reset_configs else "Applying new config files:"
+            label = "Resetting overrides:" if overwrite else "Applying new override files:"
             print(f"\n{label}")
             for rel_path in applied:
                 print(f"  + {rel_path}")
 
     write_installed_version(server_dir, target_version)
-    print(f"\n[OK] Updated to {MODPACK_NAME} {target_version}.")
+    print(f"\n[OK] Updated to {MODPACK_NAME} {target_version}")
 
 
 if __name__ == "__main__":

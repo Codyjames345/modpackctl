@@ -371,6 +371,10 @@ def store_overrides(zip_path: Path | str) -> int:
     """
     Extract the overrides/ tree from a CurseForge zip into OVERRIDES_STORE,
     replacing any previously stored overrides. Returns the number of files stored.
+
+    Inside shaderpacks/, only direct .zip files are stored — extracted shaderpack
+    folders (which Minecraft creates when a player uses them) and other non-zip
+    files are skipped so they don't bloat the overrides bundle.
     """
     zip_path = Path(zip_path)
     if not zip_path.is_file() or zip_path.suffix != ".zip":
@@ -389,6 +393,10 @@ def store_overrides(zip_path: Path | str) -> int:
             relative_path = member_name[len(prefix):]
             if not relative_path:
                 continue
+            if relative_path.startswith("shaderpacks/"):
+                sub_path = relative_path[len("shaderpacks/"):].rstrip("/")
+                if not sub_path or "/" in sub_path or not sub_path.lower().endswith(".zip"):
+                    continue
             out_path = OVERRIDES_STORE / relative_path
             if member_name.endswith("/"):
                 out_path.mkdir(parents=True, exist_ok=True)
@@ -2096,12 +2104,18 @@ def reset_file(client: bool = False, server: bool = False, config: bool = False,
 
     for target, example_name, is_config in tasks:
         if is_config:
-            prompt = f"Overwrite {target} with {example_name}? This will erase your current config. [y/N] "
-        else:
-            if not target.exists():
-                print(f"[INFO] {target.name} does not exist — skipping.")
+            if target.exists():
+                prompt = f"Overwrite {target} with {example_name}? This will erase your current config. [y/N] "
+            else:
+                print(f"[INFO] {target.name} does not exist — copying {example_name} from repo.")
                 continue
-            prompt = f"Delete {target.name} and replace with {example_name}? [y/N] "
+        else:
+            if target.exists():
+                prompt = f"Delete {target.name} and replace with {example_name} from repo? [y/N] "
+            else:
+                print(f"[INFO] {target.name} does not exist — copying {example_name} from repo.")
+                continue
+            
         answer = input(prompt).strip().lower()
         if answer not in ("y", "yes"):
             print("[INFO] Aborted.")
@@ -2116,18 +2130,88 @@ def reset_file(client: bool = False, server: bool = False, config: bool = False,
         print(f"[OK] Reset {target.name} from {example_name}.")
 
 
+_HEX_COLOUR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+_COLOUR_KEY_DEFAULTS: dict[str, str] = {
+    "DARK_BG":   "#1e1e2e",
+    "PANEL_BG":  "#2a2b3c",
+    "ACCENT":    "#89b4fa",
+    "ACCENT_HV": "#74a0e8",
+    "ACCENT2":   "#3b3d52",
+    "TEXT":      "#cdd6f4",
+    "TEXT_DIM":  "#8b92b0",
+    "RED":       "#f38ba8",
+    "GREEN":     "#a6e3a1",
+    "YELLOW":    "#f9e2af",
+    "KONAMI":    "#cba6f7",
+}
+
+
+def _validate_and_serialize_colours(settings: dict) -> str:
+    """
+    Validate [settings.colours] from modpackctl.toml and return the JSON string
+    that gets baked into the client updater's __COLOUR_DEFAULTS_JSON__ placeholder.
+
+    The section is optional — when absent, every colour falls back to its hardcoded
+    default. When present, any key that's specified must be a known colour name with
+    a valid '#rrggbb' value; unknown keys or malformed values exit the program.
+    """
+    colours_section = settings.get("colours")
+    result = dict(_COLOUR_KEY_DEFAULTS)
+    if colours_section is None:
+        return json.dumps(result)
+    if not isinstance(colours_section, dict):
+        print("[ERROR] [settings.colours] must be a TOML table, got: "
+              f"{type(colours_section).__name__}")
+        sys.exit(1)
+    unknown = sorted(set(colours_section) - set(_COLOUR_KEY_DEFAULTS))
+    if unknown:
+        print(f"[ERROR] Unknown colour key(s) in [settings.colours]: {unknown}")
+        print(f"        Valid keys: {sorted(_COLOUR_KEY_DEFAULTS)}")
+        sys.exit(1)
+    for key, value in colours_section.items():
+        if not isinstance(value, str) or not _HEX_COLOUR_RE.match(value):
+            print(f"[ERROR] [settings.colours].{key} must be a '#rrggbb' hex string, "
+                  f"got: {value!r}")
+            sys.exit(1)
+        result[key] = value
+    return json.dumps(result)
+
+
+def _validate_beat_drop(settings: dict) -> float:
+    """Read settings.beat_drop, validating it's a non-negative number. Defaults to 44.0."""
+    value = settings.get("beat_drop", 44.0)
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or value < 0:
+        print(f"[ERROR] settings.beat_drop must be a non-negative number, got: {value!r}")
+        sys.exit(1)
+    return float(value)
+
+
+def _validate_rainbow_bpm(settings: dict) -> float:
+    """Read settings.rainbow_bpm, validating it's a positive number. Defaults to 113.0."""
+    value = settings.get("rainbow_bpm", 113.0)
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or value <= 0:
+        print(f"[ERROR] settings.rainbow_bpm must be a positive number, got: {value!r}")
+        sys.exit(1)
+    return float(value)
+
+
 def bake_client_updater() -> bool:
     """
     Substitute config placeholders in client-updater.example.py and write the result to
     releases/{file_prefix}-updater.py. Returns False if client-updater.example.py is not present.
 
     Supported placeholders (written as bare Python string literals in client-updater.example.py):
-      __GITHUB_USER__      — GitHub username from modpackctl.toml
-      __GITHUB_REPO__      — GitHub repo name from modpackctl.toml
-      __MODPACK_NAME__     — settings.modpack_name from modpackctl.toml
-      __LOGO_URL__         — logo URL from modpackctl.toml (empty string if unset)
-      __SECRET_VIDEO_URL__ — easter egg video URL (defaults to Never Gonna Give You Up)
-      __ENABLE_RAINBOW__   — True/False; settings.enable_rainbow from modpackctl.toml (default: False)
+      __GITHUB_USER__          — GitHub username from modpackctl.toml
+      __GITHUB_REPO__          — GitHub repo name from modpackctl.toml
+      __MODPACK_NAME__         — settings.modpack_name from modpackctl.toml
+      __LOGO_URL__             — logo URL from modpackctl.toml (empty string if unset)
+      __SECRET_VIDEO_URL__     — easter egg video URL (defaults to Never Gonna Give You Up)
+      __ENABLE_SECRET__        — True/False; settings.enable_secret (default: True)
+      __ENABLE_RAINBOW__       — True/False; settings.enable_rainbow (default: False)
+      __RAINBOW_BPM__          — float BPM; settings.rainbow_bpm (default: 113.0)
+      __BEAT_DROP_SECONDS__    — float seconds; settings.beat_drop (default: 44.0)
+      __COLOUR_DEFAULTS_JSON__ — JSON dict of the 11 theme colours, validated against
+                                 [settings.colours] in modpackctl.toml
     """
     _ensure_files(CLIENT_UPDATE_SCRIPT)
     if not CLIENT_UPDATE_SCRIPT.exists():
@@ -2141,14 +2225,20 @@ def bake_client_updater() -> bool:
     secret_video_url  = settings.get("secret_video_url", _DANCE_DEFAULT_URL)
     enable_secret     = settings.get("enable_secret",  True)
     enable_rainbow    = settings.get("enable_rainbow",  False)
+    rainbow_bpm       = _validate_rainbow_bpm(settings)
+    beat_drop         = _validate_beat_drop(settings)
+    colour_json       = _validate_and_serialize_colours(settings)
     content = CLIENT_UPDATE_SCRIPT.read_text(encoding="utf-8")
-    content = content.replace('"__GITHUB_USER__"',      f'"{user}"')
-    content = content.replace('"__GITHUB_REPO__"',      f'"{repo}"')
-    content = content.replace('"__MODPACK_NAME__"',     f'"{modpack_name}"')
-    content = content.replace('"__LOGO_URL__"',         f'"{logo_url}"')
-    content = content.replace('"__SECRET_VIDEO_URL__"', f'"{secret_video_url}"')
-    content = content.replace('"__ENABLE_SECRET__"',    str(bool(enable_secret)))
-    content = content.replace('"__ENABLE_RAINBOW__"',   str(bool(enable_rainbow)))
+    content = content.replace('"__GITHUB_USER__"',          f'"{user}"')
+    content = content.replace('"__GITHUB_REPO__"',          f'"{repo}"')
+    content = content.replace('"__MODPACK_NAME__"',         f'"{modpack_name}"')
+    content = content.replace('"__LOGO_URL__"',             f'"{logo_url}"')
+    content = content.replace('"__SECRET_VIDEO_URL__"',     f'"{secret_video_url}"')
+    content = content.replace('"__ENABLE_SECRET__"',        str(bool(enable_secret)))
+    content = content.replace('"__ENABLE_RAINBOW__"',       str(bool(enable_rainbow)))
+    content = content.replace('"__RAINBOW_BPM__"',          f'"{rainbow_bpm}"')
+    content = content.replace('"__BEAT_DROP_SECONDS__"',    f'"{beat_drop}"')
+    content = content.replace('"__COLOUR_DEFAULTS_JSON__"', repr(colour_json))
     dest_path = _baked_client_updater_path()
     dest_path.parent.mkdir(parents=True, exist_ok=True)
     dest_path.write_text(content, encoding="utf-8")
@@ -2397,7 +2487,7 @@ if __name__ == "__main__":
     parser_bake = subparsers.add_parser("bake-updater", help="Bake the updater script with config values")
     bake_side = parser_bake.add_mutually_exclusive_group()
     bake_side.add_argument("--client", action="store_true", help="Bake client-updater.py (default)")
-    bake_side.add_argument("--server", action="store_true", help="Bake server-updater.py instead (no exe)")
+    bake_side.add_argument("--server", action="store_true", help="Bake server-updater.py instead")
 
     # reset-file
     parser_reset_tmpl = subparsers.add_parser("reset-file", help="Reset a template file in the current directory")

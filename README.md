@@ -164,6 +164,14 @@ modpack_name = "<YourModpackName>"
 # Whether to show the rainbow effect in the easter egg (optional; default: false)
 # enable_rainbow = true
 
+# Optional theme colour overrides for the client updater. Any of the supported
+# keys (DARK_BG, ACCENT, ACCENT2, TEXT, RED, etc.) can be omitted to keep its
+# default; unknown keys or non-#rrggbb values abort the bake.
+# [settings.colours]
+# DARK_BG = "#0c0431"
+# ACCENT  = "#fedb0e"
+# # ... see modpackctl.example.toml for the full list
+
 # CurseForge project IDs to exclude from client releases
 server_only = [123456, 789012]
 
@@ -291,6 +299,8 @@ Use these placeholders as plain string literals anywhere in `client-updater.exam
 | `"__ENABLE_SECRET__"` | `settings.enable_secret` as `True` or `False` (default: `True`) |
 | `"__SECRET_VIDEO_URL__"` | `settings.secret_video_url`, or the default Never Gonna Give You Up URL |
 | `"__ENABLE_RAINBOW__"` | `settings.enable_rainbow` as `True` or `False` (default: `False`) |
+| `"__BEAT_DROP_SECONDS__"` | `settings.beat_drop` as a float (default: `44.0`) — non-negative; malformed values abort the bake |
+| `"__COLOUR_DEFAULTS_JSON__"` | JSON dict of the 11 theme colours, validated against `[settings.colours]` in `modpackctl.toml` |
 
 Run `build-exe` to compile the `.exe` from an already-baked script.
 

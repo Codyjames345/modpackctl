@@ -37,8 +37,31 @@ modpack_name = "<YourModpackName>"
 # Optional: whether to show the rainbow effect in the easter egg (default: false)
 # enable_rainbow = true
 
+# Optional: the beats per minute to pulse the rainbow effect at (default: 113)
+# rainbow_bpm = 113
+
+# Optional: seconds from audio start until the DVD-logo window bounce kicks in
+# during the dance easter egg (default: 43.5; set to 0 to start instantly)
+# beat_drop = 43.5
+
 # List project IDs to exclude from client releases (server-side only mods)
 server_only = []
 
 # List project IDs to exclude from server releases (client-side only mods)
 client_only = []
+
+# Optional: theme colour overrides for the updater. Any key listed below can be
+# omitted to keep the default. Unknown keys or non-#rrggbb values cause modpackctl
+# to abort the bake.
+# [settings.colours]
+# DARK_BG   = "#1e1e2e"   # Background
+# PANEL_BG  = "#2a2b3c"   # Panels / Secondary buttons
+# ACCENT    = "#89b4fa"   # Header text / Primary buttons
+# ACCENT_HV = "#74a0e8"   # Primary buttons (clicked)
+# ACCENT2   = "#3b3d52"   # Header background / Secondary buttons (clicked)
+# TEXT      = "#cdd6f4"   # Text
+# TEXT_DIM  = "#8b92b0"   # Dim text
+# RED       = "#f38ba8"   # Changelog: removed
+# GREEN     = "#a6e3a1"   # Changelog: added
+# YELLOW    = "#f9e2af"   # Changelog: updated
+# KONAMI    = "#cba6f7"   # Secret button
