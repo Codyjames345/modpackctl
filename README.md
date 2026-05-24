@@ -221,7 +221,7 @@ python modpackctl.py publish --message "Improved performance and fixed crashes."
 | `publish [version] [--message "..."]` | Build a client release (calls `release` internally), create a GitHub Release with client-filtered changelog notes, push `versions.json` and `snapshots/` to `gh-pages`, and push an updated `README.md` and `.gitignore` to the working repo. Uploads the zip, baked `.py`, and `.exe` (if built). `version` defaults to the latest committed version if omitted. `--message` overrides the message set at `commit` time. |
 | `update <version> [--server]` | Rebuild the `build/` folder for a version without zipping or producing any release artifacts. Defaults to client view; `--server` excludes client-only mods, shaderpacks, and resourcepacks. |
 | `purge [--all]` | Remove stale files from the download cache. Without `--all`, only removes cached files not in the latest snapshot. |
-| `build-pages` | Write `versions.json` and `snapshots/` to a local `gh-pages/` folder. Also runs automatically as part of `release`. Useful for a standalone refresh or manually pushing to `gh-pages` if `publish` fails. |
+| `build-pages` | Write `versions.json`, `snapshots/`, and `overrides.zip` to a local `gh-pages/` folder. Also runs automatically as part of `release`. Useful for a standalone refresh or manually pushing to `gh-pages` if `publish` fails. |
 | `bake-updater [--server]` | Bake `releases/{file_prefix}-client-updater.py` from the client updater template. `--server` bakes `releases/{file_prefix}-server-updater.py` instead (no exe). |
 | `reset-file --client\|--server\|--config\|--all` | Reset a working copy in the current directory from its example template. `--client` overwrites `client-updater.py`, `--server` overwrites `server-updater.py`, `--config` overwrites `modpackctl.toml` with `modpackctl.example.toml`, `--all` resets all three. A flag is required. If an example template is missing from the modpackctl install directory it is downloaded from the modpackctl GitHub repo automatically. |
 | `build-exe` | Build `releases/{file_prefix}-client-updater.exe` from the baked client updater using PyInstaller. When `enable_secret` is true, also downloads and bundles the easter egg video and audio. Requires `pip install pyinstaller yt-dlp imageio-ffmpeg Pillow`. Also runs automatically as part of `release`. |
@@ -337,6 +337,17 @@ Use these placeholders as plain string literals anywhere in `server-updater.exam
 | `"__MODPACK_NAME__"` | `settings.modpack_name` from `modpackctl.toml` |
 
 **Requirements:** Python 3.8+ and an internet connection. Uses only the standard library.
+
+## Overrides
+
+Files stored in `.modpackctl/overrides/` (configs, player models, KubeJS scripts, etc.) are automatically packaged into `overrides.zip` and published to `gh-pages` as part of every `release`. Both updaters download and apply this zip after installing mods.
+
+Both updaters always apply overrides after installing mods, but the behaviour depends on the **Reset config files to defaults** option (default: No in all cases):
+
+- **Reset unchecked (default):** only files that do not already exist in the install directory are written. Existing configs are never overwritten, so players keep any customisations they have made.
+- **Reset checked:** all override files are extracted, overwriting any existing versions and resetting them to the pack defaults.
+
+The `--yes` flag on the server updater skips the prompt and defaults to No (new files only).
 
 ## Repository Layout
 

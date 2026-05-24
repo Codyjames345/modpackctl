@@ -12,6 +12,7 @@ try:
     import argcomplete
 except ModuleNotFoundError:
     argcomplete = None  # type: ignore[assignment]
+import io
 import json
 import os
 import re
@@ -20,6 +21,7 @@ import sys
 import tempfile
 import urllib.error
 import urllib.request
+import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -31,7 +33,9 @@ from urllib.parse import unquote, urlparse
 GITHUB_USER  = "__GITHUB_USER__"
 GITHUB_REPO  = "__GITHUB_REPO__"
 MODPACK_NAME = "__MODPACK_NAME__"
-VERSIONS_URL = f"https://{GITHUB_USER}.github.io/{GITHUB_REPO}/versions.json"
+VERSIONS_URL  = f"https://{GITHUB_USER}.github.io/{GITHUB_REPO}/versions.json"
+SNAPSHOTS_URL = f"https://{GITHUB_USER}.github.io/{GITHUB_REPO}/snapshots"
+OVERRIDES_URL = f"https://{GITHUB_USER}.github.io/{GITHUB_REPO}/overrides.zip"
 
 if "__" in GITHUB_USER or "__" in GITHUB_REPO:
     print(
@@ -99,11 +103,21 @@ def fetch_versions() -> dict:
 
 def fetch_snapshot(commit_id: str) -> dict:
     """Fetch a snapshot from gh-pages."""
-    url = (
-        f"https://raw.githubusercontent.com/{GITHUB_USER}/{GITHUB_REPO}"
-        f"/gh-pages/snapshots/{commit_id}.json"
-    )
-    return fetch_json(url)
+    return fetch_json(f"{SNAPSHOTS_URL}/{commit_id}.json")
+
+
+def fetch_overrides_zip() -> bytes | None:
+    """Download overrides.zip from gh-pages. Returns bytes, or None if unavailable."""
+    try:
+        request = urllib.request.Request(OVERRIDES_URL, headers=HEADERS)
+        with urllib.request.urlopen(request, timeout=30) as resp:
+            return resp.read()
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return None
+        return None
+    except (urllib.error.URLError, OSError, TimeoutError):
+        return None
 
 
 # -------------------------
@@ -153,6 +167,27 @@ def diff_snapshots(old: dict, new: dict) -> dict:
 # -------------------------
 # FILE OPERATIONS
 # -------------------------
+
+def apply_overrides_zip(install_dir: Path, zip_bytes: bytes, new_files_only: bool) -> list[str]:
+    """
+    Extract overrides from zip_bytes into install_dir.
+    When new_files_only is True, skips files that already exist (preserves custom configs).
+    Returns a list of relative paths that were written.
+    """
+    applied: list[str] = []
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        for member in zf.infolist():
+            if member.is_dir():
+                continue
+            dest_path = install_dir / member.filename
+            if new_files_only and dest_path.exists():
+                continue
+            dest_path.parent.mkdir(parents=True, exist_ok=True)
+            with zf.open(member) as src, open(dest_path, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+            applied.append(member.filename)
+    return applied
+
 
 def locate_existing_file(project_id: str, entry: dict, mods_dir: Path) -> Path | None:
     """
@@ -549,6 +584,16 @@ def main() -> None:
             print("Aborted.")
             sys.exit(0)
 
+    # ---- Override prompt ----
+    reset_configs = False
+    if not args.yes:
+        try:
+            ans = input("Reset config files to defaults? [y/N] ").strip().lower()
+            reset_configs = ans in ("y", "yes")
+        except (EOFError, KeyboardInterrupt):
+            print("\nAborted.")
+            sys.exit(0)
+
     # ---- Apply: download to temp, then atomic move ----
     failed_downloads: list[str] = []
 
@@ -596,6 +641,21 @@ def main() -> None:
                 print(f"  [-] {display_name}")
             except OSError as error:
                 print(f"  [WARN] Could not delete {file_path.name}: {error}")
+
+    # ---- Apply overrides ----
+    # reset_configs=True overwrites existing files; False adds only missing ones.
+    override_zip: bytes | None = None
+    try:
+        override_zip = fetch_overrides_zip()
+    except Exception:
+        pass
+    if override_zip:
+        applied = apply_overrides_zip(server_dir, override_zip, new_files_only=not reset_configs)
+        if applied:
+            label = "Resetting config files:" if reset_configs else "Applying new config files:"
+            print(f"\n{label}")
+            for rel_path in applied:
+                print(f"  + {rel_path}")
 
     write_installed_version(server_dir, target_version)
     prefs["last_server_dir"] = str(server_dir)

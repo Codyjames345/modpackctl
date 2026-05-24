@@ -1,30 +1,31 @@
 [github]
+# Required: GitHub Repo details
 user = "<yourName>"
 repo = "<yourRepo>"
 
 [settings]
-# Display name shown in the updater GUI and used as the release zip prefix
+# Required: display name shown in the updater GUI and used as the release zip prefix
 modpack_name = "<YourModpackName>"
 
 # Optional: override the zip file prefix if it should differ from modpack_name
 # file_prefix = "<YourModpackName>"
 
-# Modpack author shown in the CurseForge export manifest.json
+# Optional: modpack author shown in the CurseForge export manifest.json
 # author = "YourName"
 
-# RAM recommended to players in MB (shown in CurseForge launcher, optional)
+# Optional: RAM recommended to players in MB (shown in CurseForge launcher)
 # recommended_ram = 8192
 
-# URL to a logo image shown in the updater header and used as the modpack image in CurseForge exports (optional; PNG or GIF)
+# Optional: URL to a logo image shown in the updater header and used as the modpack image in CurseForge exports (PNG or GIF)
 # logo_url = "https://example.com/logo.png"
 
-# Whether to include the Konami code easter egg (optional; default: true)
+# Optional: whether to include the Konami code easter egg (default: true)
 # enable_secret = false
 
-# YouTube URL for the secret easter egg video (optional; defaults to Never Gonna Give You Up)
+# Optional: YouTube URL for the secret easter egg video (defaults to Never Gonna Give You Up)
 # secret_video_url = "https://www.youtube.com/watch?v=..."
 
-# Whether to show the rainbow effect in the easter egg (optional; default: false)
+# Optional: whether to show the rainbow effect in the easter egg (default: false)
 # enable_rainbow = true
 
 # List project IDs to exclude from client releases (server-side only mods)

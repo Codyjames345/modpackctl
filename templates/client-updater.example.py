@@ -52,7 +52,9 @@ GITHUB_USER  = "__GITHUB_USER__"
 GITHUB_REPO  = "__GITHUB_REPO__"
 MODPACK_NAME = "__MODPACK_NAME__"
 LOGO_URL     = "__LOGO_URL__"
-VERSIONS_URL = f"https://{GITHUB_USER}.github.io/{GITHUB_REPO}/versions.json"
+VERSIONS_URL  = f"https://{GITHUB_USER}.github.io/{GITHUB_REPO}/versions.json"
+SNAPSHOTS_URL = f"https://{GITHUB_USER}.github.io/{GITHUB_REPO}/snapshots"
+OVERRIDES_URL = f"https://{GITHUB_USER}.github.io/{GITHUB_REPO}/overrides.zip"
 
 if "__" in GITHUB_USER or "__" in GITHUB_REPO:
     print(
@@ -195,11 +197,21 @@ def fetch_versions() -> dict:
 
 def fetch_snapshot(commit_id: str) -> dict:
     """Fetch a snapshot from gh-pages."""
-    url = (
-        f"https://raw.githubusercontent.com/{GITHUB_USER}/{GITHUB_REPO}"
-        f"/gh-pages/snapshots/{commit_id}.json"
-    )
-    return fetch_json(url)
+    return fetch_json(f"{SNAPSHOTS_URL}/{commit_id}.json")
+
+
+def fetch_overrides_zip() -> bytes | None:
+    """Download overrides.zip from gh-pages. Returns bytes, or None if unavailable."""
+    try:
+        request = urllib.request.Request(OVERRIDES_URL, headers=HEADERS)
+        with urllib.request.urlopen(request, timeout=30) as resp:
+            return resp.read()
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return None
+        return None
+    except (urllib.error.URLError, OSError, TimeoutError):
+        return None
 
 
 # -------------------------
@@ -318,6 +330,27 @@ def download_mod_file(project_id: str, file_id: str, dest_dir: Path) -> Path | N
             return local_path
     except (urllib.error.URLError, OSError, TimeoutError):
         return None
+
+
+def apply_overrides_zip(install_dir: Path, zip_bytes: bytes, new_files_only: bool) -> list[str]:
+    """
+    Extract overrides from zip_bytes into install_dir.
+    When new_files_only is True, skips files that already exist (preserves custom configs).
+    Returns a list of relative paths that were written.
+    """
+    applied: list[str] = []
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        for member in zf.infolist():
+            if member.is_dir():
+                continue
+            dest_path = install_dir / member.filename
+            if new_files_only and dest_path.exists():
+                continue
+            dest_path.parent.mkdir(parents=True, exist_ok=True)
+            with zf.open(member) as src, open(dest_path, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+            applied.append(member.filename)
+    return applied
 
 
 # -------------------------
@@ -621,6 +654,7 @@ class UpdaterApp(tk.Tk):
         self.old_snapshot: dict             = {}
         self.new_snapshot: dict             = {}
         self.update_plan: dict              = {}
+        self.reset_configs: bool            = False
 
         # Widget refs reused across screens
         self._current_frame: tk.Frame | None        = None
@@ -1420,6 +1454,17 @@ class UpdaterApp(tk.Tk):
 
             text.config(state="disabled")
 
+            reset_var = tk.BooleanVar(value=False)
+            reset_row = tk.Frame(frame, bg=DARK_BG, padx=20)
+            reset_row.pack(fill="x", pady=(4, 0))
+            tk.Checkbutton(
+                reset_row,
+                text="Reset config files to defaults  (overwrites your existing settings)",
+                variable=reset_var, font=FONT_BODY,
+                bg=DARK_BG, fg=TEXT_DIM, selectcolor=PANEL_BG,
+                activebackground=DARK_BG, activeforeground=TEXT,
+            ).pack(anchor="w")
+
             button_row = tk.Frame(frame, bg=DARK_BG)
             button_row.pack(fill="x", padx=20, pady=12)
             self._secondary_button(button_row, "Cancel", self._on_close).pack(side="right", padx=(10, 0))
@@ -1427,9 +1472,12 @@ class UpdaterApp(tk.Tk):
                 button_row, "←  Back", self._show_version_options,
             ).pack(side="right", padx=(10, 0))
             confirm_label = "Confirm & Reset  →" if self.fresh_install else "Confirm & Update  →"
-            self._primary_button(
-                button_row, confirm_label, self._show_updating,
-            ).pack(side="right")
+
+            def _confirm() -> None:
+                self.reset_configs = reset_var.get()
+                self._show_updating()
+
+            self._primary_button(button_row, confirm_label, _confirm).pack(side="right")
             return frame
         self._swap_frame(build)
 
@@ -1586,8 +1634,23 @@ class UpdaterApp(tk.Tk):
                 except OSError as exc:
                     self._log(f"  [warn] could not install {tmp_path.name}: {exc}", "log_warn")
 
-            # Phase 4: record the installed version last — a crash during
-            # phases 1-3 leaves bcc-common.toml at the previous version.
+            # Phase 4: apply overrides
+            # reset_configs=True overwrites existing files; False adds only missing ones.
+            self._set_progress("Applying overrides…")
+            try:
+                override_zip = fetch_overrides_zip()
+            except Exception:
+                override_zip = None
+            if override_zip:
+                applied = apply_overrides_zip(
+                    self.modpack_dir, override_zip,
+                    new_files_only=not self.reset_configs,
+                )
+                for rel_path in applied:
+                    self._log(f"  + {rel_path}", "log_add")
+
+            # Phase 5: record the installed version last — a crash during
+            # phases 1-4 leaves bcc-common.toml at the previous version.
             write_installed_version(self.modpack_dir, self.target_version)
             self._log("")
             self._log(f"bcc-common.toml → {self.target_version}", "log_version")

@@ -1563,6 +1563,14 @@ def _write_pages_assets(dest: Path) -> None:
             save_snapshot(commit_id, snapshot_data)
         snapshot_out.write_text(json.dumps(snapshot_data, indent=2))
 
+    if OVERRIDES_STORE.exists() and any(OVERRIDES_STORE.rglob("*")):
+        overrides_zip_path = dest / "overrides.zip"
+        with zipfile.ZipFile(overrides_zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for file_path in sorted(OVERRIDES_STORE.rglob("*")):
+                if file_path.is_file():
+                    arcname = file_path.relative_to(OVERRIDES_STORE)
+                    zf.write(file_path, arcname.as_posix())
+
 
 def _push_pages_assets() -> None:
     """
@@ -1586,7 +1594,12 @@ def _push_pages_assets() -> None:
             shutil.copy2(PAGES_OUTPUT / "versions.json", "versions.json")
             if (PAGES_OUTPUT / "snapshots").exists():
                 shutil.copytree(PAGES_OUTPUT / "snapshots", "snapshots", dirs_exist_ok=True)
-            _run(["git", "add", "versions.json", "snapshots"], check=True)
+            if (PAGES_OUTPUT / "overrides.zip").exists():
+                shutil.copy2(PAGES_OUTPUT / "overrides.zip", "overrides.zip")
+            git_add_args = ["git", "add", "versions.json", "snapshots"]
+            if Path("overrides.zip").exists():
+                git_add_args.append("overrides.zip")
+            _run(git_add_args, check=True)
             _run(["git", "commit", "-m", "init: versions.json + snapshots"], check=True)
             _run(["git", "push", "-u", "origin", "gh-pages"], check=True)
             _run(["git", "checkout", "-"], check=True)
@@ -1617,7 +1630,12 @@ def _push_pages_assets() -> None:
             shutil.copy2(PAGES_OUTPUT / "versions.json", worktree_path / "versions.json")
             if (PAGES_OUTPUT / "snapshots").exists():
                 shutil.copytree(PAGES_OUTPUT / "snapshots", worktree_path / "snapshots", dirs_exist_ok=True)
-            _run(["git", "add", "versions.json", "snapshots"], check=True, cwd=worktree_path)
+            if (PAGES_OUTPUT / "overrides.zip").exists():
+                shutil.copy2(PAGES_OUTPUT / "overrides.zip", worktree_path / "overrides.zip")
+            wt_git_add = ["git", "add", "versions.json", "snapshots"]
+            if (worktree_path / "overrides.zip").exists():
+                wt_git_add.append("overrides.zip")
+            _run(wt_git_add, check=True, cwd=worktree_path)
 
             try:
                 _run(
