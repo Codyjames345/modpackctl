@@ -142,18 +142,40 @@ _BCC_TEMPLATE = """\
 """
 
 
+def _bcc_version(version: str) -> str:
+    """Return the full modpackVersion string as stored in bcc-common.toml."""
+    return f"{MODPACK_NAME} - {version}"
+
+
+def _bare_version(version: str | None) -> str:
+    """Extract version number from 'MODPACK_NAME - VERSION' format, or '?' if absent/malformed."""
+    if not version:
+        return "?"
+    prefix = f"{MODPACK_NAME} - "
+    if version.startswith(prefix):
+        return version[len(prefix):]
+    return "?"
+
+
+def _display_version(version: str | None) -> str:
+    """Format a version for display: 'v1.2.0', or '?' (no prefix) if absent/malformed."""
+    bare = _bare_version(version)
+    return "?" if bare == "?" else f"v{bare}"
+
+
 def write_installed_version(modpack_dir: Path, version: str) -> None:
     """Write modpackVersion (and modpackName) into config/bcc-common.toml."""
     bcc_path = modpack_dir / _BCC_CONFIG_PATH
+    full_version = _bcc_version(version)
     if not bcc_path.exists():
         bcc_path.parent.mkdir(parents=True, exist_ok=True)
         bcc_path.write_text(
-            _BCC_TEMPLATE.format(name=MODPACK_NAME, version=version),
+            _BCC_TEMPLATE.format(name=MODPACK_NAME, version=full_version),
             encoding="utf-8",
         )
         return
     text = bcc_path.read_text(encoding="utf-8")
-    text = _BCC_VERSION_RE.sub(rf'\g<1>"{version}"',      text)
+    text = _BCC_VERSION_RE.sub(rf'\g<1>"{full_version}"', text)
     text = _BCC_NAME_RE.sub(   rf'\g<1>"{MODPACK_NAME}"', text)
     bcc_path.write_text(text, encoding="utf-8")
 
@@ -1094,6 +1116,8 @@ class UpdaterApp(tk.Tk):
         try:
             assert self.modpack_dir is not None
             self.local_version = read_installed_version(self.modpack_dir)
+            if self.local_version is not None and _bare_version(self.local_version) == "?":
+                self.fresh_install = True
 
             versions_data       = fetch_versions()
             self.versions_data  = versions_data
@@ -1110,7 +1134,7 @@ class UpdaterApp(tk.Tk):
                 ))
                 return
 
-            if self.local_version == self.latest_version:
+            if self.local_version == _bcc_version(self.latest_version or ""):
                 self.after(0, self._show_up_to_date)
                 return
 
@@ -1133,7 +1157,7 @@ class UpdaterApp(tk.Tk):
                 font=("Consolas", 16, "bold"), bg=DARK_BG, fg=ACCENT,
             ).pack(pady=(10, 4))
             tk.Label(
-                body, text=f"Installed version: v{self.local_version}",
+                body, text=f"Installed version: {_display_version(self.local_version)}",
                 font=FONT_BODY, bg=DARK_BG, fg=TEXT_DIM,
             ).pack()
             button_row = tk.Frame(frame, bg=DARK_BG)
@@ -1236,19 +1260,38 @@ class UpdaterApp(tk.Tk):
             fresh_var = tk.BooleanVar(value=self.fresh_install or not self.local_version)
             fresh_row = tk.Frame(body, bg=DARK_BG)
             fresh_row.pack(fill="x", pady=(12, 4))
-            tk.Checkbutton(
-                fresh_row,
-                text="Fresh install  (deletes all existing mods and re-downloads everything)",
-                variable=fresh_var, font=FONT_BODY,
-                bg=DARK_BG, fg=TEXT, selectcolor=PANEL_BG,
-                activebackground=DARK_BG, activeforeground=TEXT,
-            ).pack(anchor="w")
+            if not self.local_version:
+                tk.Label(
+                    fresh_row,
+                    text="⚠  Installing this modpack will clear the mods/ folder in your selected directory.",
+                    font=FONT_BODY, bg=DARK_BG, fg=YELLOW,
+                    wraplength=560, justify="left",
+                ).pack(anchor="w")
+            else:
+                malformed = _bare_version(self.local_version) == "?"
+                tk.Checkbutton(
+                    fresh_row,
+                    text="Fresh install  (deletes all existing mods and re-downloads everything)",
+                    variable=fresh_var, font=FONT_BODY,
+                    bg=DARK_BG, fg=TEXT_DIM if malformed else TEXT,
+                    selectcolor=PANEL_BG,
+                    activebackground=DARK_BG, activeforeground=TEXT,
+                    disabledforeground=TEXT_DIM,
+                    state="disabled" if malformed else "normal",
+                ).pack(anchor="w")
 
             if self.local_version:
                 tk.Label(
-                    body, text=f"Installed: v{self.local_version}",
+                    body, text=f"Installed: {_display_version(self.local_version)}",
                     font=FONT_MONO, bg=DARK_BG, fg=TEXT_DIM,
                 ).pack(anchor="w", pady=(12, 0))
+                if _bare_version(self.local_version) == "?":
+                    tk.Label(
+                        body,
+                        text="⚠  Installed version is unrecognized — update will proceed as a fresh install.",
+                        font=FONT_MONO, bg=DARK_BG, fg=YELLOW,
+                        wraplength=560, justify="left",
+                    ).pack(anchor="w", pady=(4, 0))
 
             def confirm() -> None:
                 raw_version = version_var.get().replace(" (latest)", "").strip()
@@ -1290,8 +1333,7 @@ class UpdaterApp(tk.Tk):
                     self.release_message  = entry.get("message", "")
                     self.target_modloader = entry.get("modloader", "")
                 if (not self.fresh_install
-                        and self.local_version
-                        and version_str == str(self.local_version)):
+                        and self.local_version == _bcc_version(version_str)):
                     old_commit = entry["commit"]
 
             if not target_commit:
@@ -1320,7 +1362,7 @@ class UpdaterApp(tk.Tk):
         def build() -> tk.Frame:
             frame = tk.Frame(self, bg=DARK_BG)
             from_label = (
-                f"v{self.local_version}"
+                _display_version(self.local_version)
                 if self.local_version and not self.fresh_install
                 else "fresh install"
             )
@@ -1335,6 +1377,10 @@ class UpdaterApp(tk.Tk):
                         for f in sorted(category_dir.iterdir(), key=lambda p: p.name.lower()):
                             existing_files.append(f.name)
 
+            changes:       dict      = {}
+            added_names:   list[str] = []
+            updated_names: list[str] = []
+            removed_names: list[str] = []
             if self.fresh_install:
                 changes     = diff_snapshots(self.old_snapshot, self.new_snapshot)
                 num_added   = len(changes["added"])
@@ -1487,7 +1533,7 @@ class UpdaterApp(tk.Tk):
         def build() -> tk.Frame:
             frame = tk.Frame(self, bg=DARK_BG)
             from_label = (
-                f"v{self.local_version or '?'}" if not self.fresh_install else "fresh install"
+                _display_version(self.local_version) if not self.fresh_install else "fresh install"
             )
             self._header(frame, subtitle=f"{from_label}  →  v{self.target_version}")
             self._progress_var.set("Starting…")
@@ -1653,7 +1699,7 @@ class UpdaterApp(tk.Tk):
             # phases 1-4 leaves bcc-common.toml at the previous version.
             write_installed_version(self.modpack_dir, self.target_version)
             self._log("")
-            self._log(f"bcc-common.toml → {self.target_version}", "log_version")
+            self._log(f"bcc-common.toml → {_bcc_version(self.target_version)}", "log_version")
 
             self.after(0, lambda: self._show_outcome(
                 success=True,
@@ -1684,6 +1730,9 @@ class UpdaterApp(tk.Tk):
                     self._konami_button_row = button_row
                     if self._konami_unlocked:
                         self._add_dance_button(button_row)
+                if self._log_text is not None:
+                    self.update_idletasks()
+                    self._log_text.see("end")
             self.after(0, add_finish_button)
             # Update _current_builder so that returning from the dance screen
             # shows a proper outcome screen rather than rebuilding the blank

@@ -265,18 +265,40 @@ _BCC_TEMPLATE = """\
 """
 
 
+def _bcc_version(version: str) -> str:
+    """Return the full modpackVersion string as stored in bcc-common.toml."""
+    return f"{MODPACK_NAME} - {version}"
+
+
+def _bare_version(version: str | None) -> str:
+    """Extract version number from 'MODPACK_NAME - VERSION' format, or '?' if absent/malformed."""
+    if not version:
+        return "?"
+    prefix = f"{MODPACK_NAME} - "
+    if version.startswith(prefix):
+        return version[len(prefix):]
+    return "?"
+
+
+def _display_version(version: str | None) -> str:
+    """Format a version for display: 'v1.2.0', or '?' (no prefix) if absent/malformed."""
+    bare = _bare_version(version)
+    return "?" if bare == "?" else f"v{bare}"
+
+
 def write_installed_version(server_dir: Path, version: str) -> None:
     """Write modpackVersion (and modpackName) into config/bcc-common.toml."""
     bcc_path = server_dir / _BCC_CONFIG_PATH
+    full_version = _bcc_version(version)
     if not bcc_path.exists():
         bcc_path.parent.mkdir(parents=True, exist_ok=True)
         bcc_path.write_text(
-            _BCC_TEMPLATE.format(name=MODPACK_NAME, version=version),
+            _BCC_TEMPLATE.format(name=MODPACK_NAME, version=full_version),
             encoding="utf-8",
         )
         return
     text = bcc_path.read_text(encoding="utf-8")
-    text = _BCC_VERSION_RE.sub(rf'\g<1>"{version}"',      text)
+    text = _BCC_VERSION_RE.sub(rf'\g<1>"{full_version}"', text)
     text = _BCC_NAME_RE.sub(   rf'\g<1>"{MODPACK_NAME}"', text)
     bcc_path.write_text(text, encoding="utf-8")
 
@@ -464,6 +486,12 @@ def main() -> None:
         print(f"[ERROR] Server directory does not exist: {server_dir}")
         sys.exit(1)
 
+    prev_dir = prefs.get("last_server_dir")
+    if prev_dir != str(server_dir):
+        prefs["last_server_dir"] = str(server_dir)
+        save_prefs(prefs)
+        print(f"Server directory set to: {server_dir}")
+
     mods_dir = server_dir / "mods"
 
     # ---- Fetch available versions ----
@@ -501,23 +529,31 @@ def main() -> None:
     # ---- Detect installed version ----
     installed_version = read_installed_version(server_dir)
 
-    # Smart fresh default: if nothing is installed, default to fresh
+    # Smart fresh default: if nothing is installed or version is malformed, default to fresh
     fresh: bool = args.fresh if args.fresh is not None else (installed_version is None)
+    if installed_version is not None and _bare_version(installed_version) == "?":
+        fresh = True
 
     # ---- Print plan summary ----
     print(f"\n{MODPACK_NAME} Server Updater")
     print("=" * 40)
     if installed_version:
-        print(f"  Installed : {installed_version}")
+        print(f"  Installed : {_display_version(installed_version)}")
     else:
         print(f"  Installed : (none detected)")
-    print(f"  Target    : {target_version}")
+    print(f"  Target    : v{target_version}")
     if fresh:
         print(f"  Mode      : fresh install")
     else:
         print(f"  Mode      : incremental update")
+    print(f"  Directory : {server_dir}")
 
-    if installed_version == target_version and not fresh:
+    if not installed_version:
+        print("[WARN] Installing this modpack will clear the mods/ folder.")
+    elif _bare_version(installed_version) == "?":
+        print("[WARN] Installed version is unrecognized — proceeding as a fresh install.")
+
+    if installed_version == _bcc_version(target_version) and not fresh:
         print(f"\n[OK] Already on version {target_version}. Nothing to do.")
         sys.exit(0)
 
@@ -535,19 +571,19 @@ def main() -> None:
         old_snapshot: dict = {}
     else:
         installed_entry = next(
-            (entry for entry in available_versions if str(entry["version"]) == str(installed_version)),
+            (entry for entry in available_versions if _bcc_version(str(entry["version"])) == str(installed_version)),
             None,
         )
         if installed_entry is None:
-            print(f"[WARN] Installed version '{installed_version}' not found in versions.json — treating as fresh install.")
+            print(f"[WARN] Installed version '{_display_version(installed_version)}' not found in versions.json — treating as fresh install.")
             old_snapshot = {}
             fresh = True
         else:
-            print(f"Fetching snapshot for installed version {installed_version} ...")
+            print(f"Fetching snapshot for installed version {_display_version(installed_version)} ...")
             try:
                 old_raw_snapshot = fetch_snapshot(installed_entry["commit"])
             except Exception as error:
-                print(f"[ERROR] Could not fetch snapshot for {installed_version}: {error}")
+                print(f"[ERROR] Could not fetch snapshot for {_display_version(installed_version)}: {error}")
                 sys.exit(1)
             old_snapshot = filter_for_server(old_raw_snapshot, client_only_ids)
 
@@ -658,8 +694,6 @@ def main() -> None:
                 print(f"  + {rel_path}")
 
     write_installed_version(server_dir, target_version)
-    prefs["last_server_dir"] = str(server_dir)
-    save_prefs(prefs)
     print(f"\n[OK] Updated to {MODPACK_NAME} {target_version}.")
 
 

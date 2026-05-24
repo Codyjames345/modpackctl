@@ -19,6 +19,15 @@ modpack_name = "<YourModpackName>"
 # Optional: URL to a logo image shown in the updater header and used as the modpack image in CurseForge exports (PNG or GIF)
 # logo_url = "https://example.com/logo.png"
 
+# Optional: server address shown in the README connect section
+# server_address = "play.example.com"
+
+# Optional: Discord invite URL listed in the README Community section
+# discord_url = "https://discord.gg/..."
+
+# Optional: live map URL listed in the README Community section
+# map_url = "https://map.example.com"
+
 # Optional: whether to include the Konami code easter egg (default: true)
 # enable_secret = false
 

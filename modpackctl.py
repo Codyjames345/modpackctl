@@ -2350,25 +2350,29 @@ if __name__ == "__main__":
 
     # remove-commit
     parser_remove = subparsers.add_parser("remove-commit", help="Permanently remove a committed version from history (irreversible)")
-    parser_remove.add_argument("version", help="Version to remove")
+    parser_remove.add_argument("version", nargs="?", default=None, help="Version to remove (default: latest)")
 
     # set-message
     parser_set_message = subparsers.add_parser("set-message", help="Set or clear the release note for any committed version")
-    parser_set_message.add_argument("version", help="Version to update")
+    parser_set_message.add_argument("version", nargs="?", default=None, help="Version to update (default: latest)")
     parser_set_message.add_argument("message", nargs="?", default="", help="New release note (omit to clear the existing message)")
 
     # changelog
     parser_changelog = subparsers.add_parser("changelog", help="Generate a Markdown changelog between two versions")
-    parser_changelog.add_argument("v1", help="Starting version (or the only version for an initial-release changelog)")
+    parser_changelog.add_argument("v1", nargs="?", default=None, help="Starting version (default: latest)")
     parser_changelog.add_argument("v2", nargs="?", default=None, help="Ending version (omit to treat v1 as an initial release)")
     parser_changelog.add_argument("--out", default="changelog.md", metavar="FILE", help="Output file (default: changelog.md)")
-    parser_changelog.add_argument("--server", action="store_true", help="Server view: exclude client-only mods, shaderpacks, and resourcepacks")
+    changelog_side = parser_changelog.add_mutually_exclusive_group()
+    changelog_side.add_argument("--client", action="store_true", help="Client view (default): exclude server-only mods")
+    changelog_side.add_argument("--server", action="store_true", help="Server view: exclude client-only mods, shaderpacks, and resourcepacks")
     parser_changelog.add_argument("--message", metavar="MESSAGE", default="", help="Optional note inserted below the heading")
 
     # release
     parser_release = subparsers.add_parser("release", help="Build a release zip (client by default)")
-    parser_release.add_argument("version", help="Version to release")
-    parser_release.add_argument("--server", action="store_true", help="Build a server release and bake server-updater (no exe)")
+    parser_release.add_argument("version", nargs="?", default=None, help="Version to release (default: latest)")
+    release_side = parser_release.add_mutually_exclusive_group()
+    release_side.add_argument("--client", action="store_true", help="Build a client release (default)")
+    release_side.add_argument("--server", action="store_true", help="Build a server release and bake server-updater (no exe)")
 
     # publish
     parser_publish = subparsers.add_parser("publish", help="Build a client release and publish to GitHub")
@@ -2377,8 +2381,10 @@ if __name__ == "__main__":
 
     # update
     parser_update = subparsers.add_parser("update", help="Rebuild the build folder for a version without zipping")
-    parser_update.add_argument("version", help="Version to build")
-    parser_update.add_argument("--server", action="store_true", help="Server view: exclude client-only mods, shaderpacks, and resourcepacks")
+    parser_update.add_argument("version", nargs="?", default=None, help="Version to build (default: latest)")
+    update_side = parser_update.add_mutually_exclusive_group()
+    update_side.add_argument("--client", action="store_true", help="Client view (default): exclude server-only mods")
+    update_side.add_argument("--server", action="store_true", help="Server view: exclude client-only mods, shaderpacks, and resourcepacks")
 
     # purge
     parser_purge = subparsers.add_parser("purge", help="Remove old files from the download cache")
@@ -2389,7 +2395,9 @@ if __name__ == "__main__":
 
     # bake-updater
     parser_bake = subparsers.add_parser("bake-updater", help="Bake the updater script with config values")
-    parser_bake.add_argument("--server", action="store_true", help="Bake server-updater.py instead of client-updater.py (no exe)")
+    bake_side = parser_bake.add_mutually_exclusive_group()
+    bake_side.add_argument("--client", action="store_true", help="Bake client-updater.py (default)")
+    bake_side.add_argument("--server", action="store_true", help="Bake server-updater.py instead (no exe)")
 
     # reset-file
     parser_reset_tmpl = subparsers.add_parser("reset-file", help="Reset a template file in the current directory")
@@ -2420,33 +2428,61 @@ if __name__ == "__main__":
         show_log()
 
     elif args.command == "remove-commit":
-        remove_commit(args.version)
+        version = args.version
+        if version is None:
+            log = load_log()
+            if not log:
+                print("[ERROR] No committed versions found.")
+                sys.exit(1)
+            version = log[-1]["version"]
+        remove_commit(version)
 
     elif args.command == "set-message":
-        if not get_log_entry(args.version):
-            print(f"[ERROR] Version '{args.version}' not found in log.")
+        version = args.version
+        if version is None:
+            log = load_log()
+            if not log:
+                print("[ERROR] No committed versions found.")
+                sys.exit(1)
+            version = log[-1]["version"]
+        if not get_log_entry(version):
+            print(f"[ERROR] Version '{version}' not found in log.")
             sys.exit(1)
-        set_version_message(args.version, args.message)
+        set_version_message(version, args.message)
         if args.message:
-            print(f"[OK] Message set for v{args.version}.")
+            print(f"[OK] Message set for v{version}.")
         else:
-            print(f"[OK] Message cleared for v{args.version}.")
+            print(f"[OK] Message cleared for v{version}.")
 
     elif args.command == "changelog":
+        v1 = args.v1
+        if v1 is None:
+            log = load_log()
+            if not log:
+                print("[ERROR] No committed versions found.")
+                sys.exit(1)
+            v1 = log[-1]["version"]
         if args.server:
             cl_exclude            = get_filter_list("client_only")
             cl_exclude_categories = {"shaderpacks", "resourcepacks"}
         else:
             cl_exclude            = get_filter_list("server_only")
             cl_exclude_categories = None
-        changelog(args.v1, args.v2, out=args.out, message=args.message,
+        changelog(v1, args.v2, out=args.out, message=args.message,
                   exclude=cl_exclude, exclude_categories=cl_exclude_categories)
 
     elif args.command == "release":
+        version = args.version
+        if version is None:
+            log = load_log()
+            if not log:
+                print("[ERROR] No committed versions found.")
+                sys.exit(1)
+            version = log[-1]["version"]
         if args.server:
-            release_server(args.version)
+            release_server(version)
         else:
-            release_client(args.version)
+            release_client(version)
 
     elif args.command == "publish":
         version = args.version
@@ -2459,12 +2495,19 @@ if __name__ == "__main__":
         publish(version, message=args.message)
 
     elif args.command == "update":
+        version = args.version
+        if version is None:
+            log = load_log()
+            if not log:
+                print("[ERROR] No committed versions found.")
+                sys.exit(1)
+            version = log[-1]["version"]
         if args.server:
             excluded = get_filter_list("client_only")
-            update(args.version, exclude=excluded, exclude_categories={"shaderpacks", "resourcepacks"}, suffix="server")
+            update(version, exclude=excluded, exclude_categories={"shaderpacks", "resourcepacks"}, suffix="server")
         else:
             excluded = get_filter_list("server_only")
-            update(args.version, exclude=excluded, suffix="client")
+            update(version, exclude=excluded, suffix="client")
 
     elif args.command == "purge":
         purge_cache(args.all)

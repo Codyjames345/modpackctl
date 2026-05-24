@@ -193,8 +193,11 @@ python modpackctl.py commit MyModpack-updated.zip
 # Review what changed and view version numbers
 python modpackctl.py log
 
-# View more detailed chanelog between any two versions
+# View more detailed changelog between any two versions
 python modpackctl.py changelog 1.0.0 1.1.0
+
+# Generate a changelog for just the latest version
+python modpackctl.py changelog
 
 # Publish the latest client version to GitHub (builds zip + creates release + updates versions.json)
 python modpackctl.py publish
@@ -213,13 +216,12 @@ python modpackctl.py publish --message "Improved performance and fixed crashes."
 | `init <zip> [--force]` | Initialize from a CurseForge export zip. `--force` resets history but keeps the download cache. |
 | `commit <zip> [--major] [--message "..."]` | Record a new version from an updated export. Version is bumped automatically. `--major` forces a major bump. `--message` sets the release note shown to players in the updater changelog. |
 | `log` | List all committed versions with diff stats. |
-| `remove-commit <version>` | Permanently remove a committed version from history. Prompts for confirmation. Irreversible. |
-| `set-message <version> [message]` | Set the release note for any committed version. Omit the message to clear it. |
-| `changelog <v1> [--out output.md] [--server]` | Generate a client changelog for `v1` as an initial release. `--server` excludes client-only mods, shaderpacks, and resourcepacks. |
-| `changelog <v1> <v2> [--out output.md] [--server]` | Generate a client changelog between two versions. `--server` excludes client-only mods, shaderpacks, and resourcepacks. |
-| `release <version> [--server]` | Build a release zip and update `gh-pages/` locally. Client (default): also builds a CurseForge export zip, bakes `releases/{file_prefix}-client-updater.py`, and compiles `releases/{file_prefix}-client-updater.exe` (if PyInstaller is available). `--server`: bakes `releases/{file_prefix}-server-updater.py` instead (no exe, no CurseForge zip). |
+| `remove-commit [version]` | Permanently remove a committed version from history. Prompts for confirmation. Irreversible. `version` defaults to the latest committed version if omitted. |
+| `set-message [version] [message]` | Set the release note for any committed version. `version` defaults to the latest committed version if omitted. Omit the message to clear it. |
+| `changelog [v1] [v2] [--out output.md] [--server]` | Generate a changelog. With no versions, generates a single-version changelog for the latest version. With one version, treats it as an initial release. With two versions, diffs between them. `--server` excludes client-only mods, shaderpacks, and resourcepacks. |
+| `release [version] [--server]` | Build a release zip and update `gh-pages/` locally. Client (default): also builds a CurseForge export zip, bakes `releases/{file_prefix}-client-updater.py`, and compiles `releases/{file_prefix}-client-updater.exe` (if PyInstaller is available). `--server`: bakes `releases/{file_prefix}-server-updater.py` instead (no exe, no CurseForge zip). `version` defaults to the latest committed version if omitted. |
 | `publish [version] [--message "..."]` | Build a client release (calls `release` internally), create a GitHub Release with client-filtered changelog notes, push `versions.json` and `snapshots/` to `gh-pages`, and push an updated `README.md` and `.gitignore` to the working repo. Uploads the zip, baked `.py`, and `.exe` (if built). `version` defaults to the latest committed version if omitted. `--message` overrides the message set at `commit` time. |
-| `update <version> [--server]` | Rebuild the `build/` folder for a version without zipping or producing any release artifacts. Defaults to client view; `--server` excludes client-only mods, shaderpacks, and resourcepacks. |
+| `update [version] [--server]` | Rebuild the `build/` folder for a version without zipping or producing any release artifacts. Defaults to client view; `--server` excludes client-only mods, shaderpacks, and resourcepacks. `version` defaults to the latest committed version if omitted. |
 | `purge [--all]` | Remove stale files from the download cache. Without `--all`, only removes cached files not in the latest snapshot. |
 | `build-pages` | Write `versions.json`, `snapshots/`, and `overrides.zip` to a local `gh-pages/` folder. Also runs automatically as part of `release`. Useful for a standalone refresh or manually pushing to `gh-pages` if `publish` fails. |
 | `bake-updater [--server]` | Bake `releases/{file_prefix}-client-updater.py` from the client updater template. `--server` bakes `releases/{file_prefix}-server-updater.py` instead (no exe). |
@@ -326,7 +328,7 @@ python server-updater.py [server_dir] [--version VERSION] [--fresh] [--yes] [--w
 
 The script detects and records the installed version via `config/bcc-common.toml` (`modpackVersion` field), matching the [Better Compatibility Checker](https://www.curseforge.com/minecraft/mc-mods/better-compatibility-checker) mod format. If the file is absent it is created automatically on the first update. The script defaults to a fresh install if no version is detected.
 
-**Generating:** Running `release --server` (or `bake-updater --server` for just the script) writes `releases/{file_prefix}-server-updater.py` with your GitHub credentials baked in.
+**Generating:** Running `release --server` (or `bake-updater --server` for just the script) writes `releases/{file_prefix}-server-updater.py` with all placeholders baked in.
 
 Use these placeholders as plain string literals anywhere in `server-updater.example.py`:
 
