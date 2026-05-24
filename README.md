@@ -196,11 +196,14 @@ python modpackctl.py log
 # View more detailed chanelog between any two versions
 python modpackctl.py changelog 1.0.0 1.1.0
 
-# Publish client release to GitHub (builds zip + creates release + updates versions.json)
+# Publish the latest client version to GitHub (builds zip + creates release + updates versions.json)
+python modpackctl.py publish
+
+# Publish a specific client version
 python modpackctl.py publish 1.2.0
 
 # Optionally include a message in the release notes
-python modpackctl.py publish 1.2.0 --message "Improved performance and fixed crashes."
+python modpackctl.py publish --message "Improved performance and fixed crashes."
 ```
 
 ## Commands
@@ -215,12 +218,12 @@ python modpackctl.py publish 1.2.0 --message "Improved performance and fixed cra
 | `changelog <v1> [--out output.md] [--server]` | Generate a client changelog for `v1` as an initial release. `--server` excludes client-only mods, shaderpacks, and resourcepacks. |
 | `changelog <v1> <v2> [--out output.md] [--server]` | Generate a client changelog between two versions. `--server` excludes client-only mods, shaderpacks, and resourcepacks. |
 | `release <version> [--server]` | Build a client release zip and CurseForge export zip, bake `releases/{file_prefix}-client-updater.py`, and build `releases/{file_prefix}-client-updater.exe` (if PyInstaller is available). `--server` builds a server release zip and bakes `releases/{file_prefix}-server-updater.py` instead (no exe, no CurseForge zip). |
-| `publish <version> [--message "..."]` | Build a client release, create a GitHub Release with client-filtered changelog notes, push `versions.json` and `snapshots/` to `gh-pages`, and push an updated `README.md` and `.gitignore` to the working repo. Uploads the zip, baked `.py`, and `.exe` (if built). `--message` overrides the message set at `commit` time. |
+| `publish [version] [--message "..."]` | Build a client release, create a GitHub Release with client-filtered changelog notes, push `versions.json` and `snapshots/` to `gh-pages`, and push an updated `README.md` and `.gitignore` to the working repo. Uploads the zip, baked `.py`, and `.exe` (if built). `version` defaults to the latest committed version if omitted. `--message` overrides the message set at `commit` time. |
 | `update <version> [--server]` | Rebuild the `build/` folder for a version without zipping. Defaults to client view; `--server` excludes client-only mods, shaderpacks, and resourcepacks. |
-| `purge [--all]` | Remove stale files from the download cache. Without `--all`, only removes mods not in the latest snapshot. |
+| `purge [--all]` | Remove stale files from the download cache. Without `--all`, only removes cached files not in the latest snapshot. |
 | `build-pages` | Write `versions.json` and `snapshots/` to a local `gh-pages/` folder. Useful for manually pushing to `gh-pages` if `publish` fails. |
 | `bake-updater [--server]` | Bake `releases/{file_prefix}-client-updater.py` from the client updater template. `--server` bakes `releases/{file_prefix}-server-updater.py` instead (no exe). |
-| `reset-file [--server\|--config]` | Reset a working copy in the current directory from its example template. Default overwrites `client-updater.py` with `client-updater.example.py`. `--server` does the same for `server-updater.py`. `--config` overwrites `modpackctl.toml` with `modpackctl.example.toml`. If the example template is missing from the modpackctl install directory it is downloaded from the modpackctl GitHub repo automatically. |
+| `reset-file --client\|--server\|--config\|--all` | Reset a working copy in the current directory from its example template. `--client` overwrites `client-updater.py`, `--server` overwrites `server-updater.py`, `--config` overwrites `modpackctl.toml` with `modpackctl.example.toml`, `--all` resets all three. A flag is required. If an example template is missing from the modpackctl install directory it is downloaded from the modpackctl GitHub repo automatically. |
 | `build-exe` | Build `releases/{file_prefix}-client-updater.exe` from the baked client updater using PyInstaller. When `enable_secret` is true, also downloads and bundles the easter egg video and audio. Requires `pip install pyinstaller yt-dlp imageio-ffmpeg Pillow`. Also runs automatically as part of `release`. |
 | `export-cf <version>` | Build a CurseForge-format modpack zip for the given version, suitable for importing directly into the CurseForge launcher. Includes `manifest.json`, `modlist.html`, and the stored overrides with `bcc-common.toml` stamped with the correct version. |
 
@@ -228,8 +231,8 @@ python modpackctl.py publish 1.2.0 --message "Improved performance and fixed cra
 
 Versions follow `major.minor.patch`. The next version is calculated automatically when you `commit`:
 
-- Mods added or removed → minor bump, patch resets
-- Mods updated only → patch bump
+- Files added or removed → minor bump, patch resets
+- Files updated only → patch bump
 - Modloader version changes → major bump (automatic)
 - `--major` flag → always bumps major
 
@@ -265,8 +268,8 @@ The flow:
 
 1. **Folder picker** — autodetects a likely `.minecraft` folder and remembers the last choice between runs.
 2. **Checking** — fetches `versions.json` from GitHub Pages.
-3. **Version select** — dropdown defaulting to the latest version; includes a **Fresh install** checkbox to wipe existing mods and re-download everything clean. On confirm, the relevant snapshots are fetched from GitHub Pages.
-4. **Changelog** — shows exactly what will be added, removed, and updated, by mod name.
+3. **Version select** — dropdown defaulting to the latest version; includes a **Fresh install** checkbox to wipe existing files and re-download everything clean. On confirm, the relevant snapshots are fetched from GitHub Pages.
+4. **Changelog** — shows exactly what will be added, removed, and updated, by name.
 5. **Confirm & Update** — explicit click before any files are touched.
 6. **Atomic install** — all new files download to a temp folder first; if anything fails the install is left untouched.
 7. **Outcome** — clear success/error summary.
@@ -291,7 +294,7 @@ Run `build-exe` to compile the `.exe` from an already-baked script.
 
 To enable exe building, install the build dependencies once: `pip install pyinstaller yt-dlp imageio-ffmpeg Pillow`
 
-**Distribution:** `publish` uploads up to four assets to the GitHub Release: the modpack zip, the CurseForge export zip, `{file_prefix}-client-updater.py`, and `{file_prefix}-client-updater.exe` (if the PyInstaller build succeeded). `publish` also pushes enriched snapshots (with mod names) to the `gh-pages` branch so the changelog displays real names like "Sodium" instead of project IDs.
+**Distribution:** `publish` uploads up to four assets to the GitHub Release: the modpack zip, the CurseForge export zip, `{file_prefix}-client-updater.py`, and `{file_prefix}-client-updater.exe` (if the PyInstaller build succeeded). `publish` also pushes snapshots to the `gh-pages` branch so the changelog displays real names like "Sodium" instead of project IDs.
 
 - **New players** — download and extract the modpack zip, then download either `{file_prefix}-client-updater.exe` (no Python needed) or `{file_prefix}-client-updater.py` (requires Python 3.8+). Save it anywhere — Desktop, Downloads, etc.
 - **Existing players** — re-run their saved updater; the prefs file remembers the modpack folder.
@@ -341,7 +344,7 @@ Use these placeholders as plain string literals anywhere in `server-updater.exam
 .modpackctl/
   log.json          — version history with diff stats
   mod_cache.json    — CurseForge API cache (mod names and file names)
-  snapshots/        — per-commit mod state (used for diffs and updates)
+  snapshots/        — per-commit file state (used for diffs and updates)
   overrides/        — stored CurseForge overrides (configs, resource files)
   dl_cache/         — persistent jar store (avoids re-downloading on rebuild)
 .pyinstaller/       — PyInstaller build cache (not committed)
@@ -355,7 +358,7 @@ modpackctl.toml     — your config (not committed)
 `publish` maintains a `gh-pages` branch with two things:
 
 - `versions.json` — lists every released version and its commit hash
-- `snapshots/{commit}.json` — an enriched mod list for each version (mod names, filenames, categories)
+- `snapshots/{commit}.json` — the file list for each version (names, filenames, categories)
 
 The updater fetches `versions.json` to find the latest version, then fetches the two relevant snapshots to compute what changed since the player's current version.
 

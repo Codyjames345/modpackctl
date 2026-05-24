@@ -1292,10 +1292,6 @@ class UpdaterApp(tk.Tk):
             )
             self._header(frame, subtitle=f"{from_label}  →  v{self.target_version}")
 
-            changes     = diff_snapshots(self.old_snapshot, self.new_snapshot)
-            num_added   = len(changes["added"])
-            num_updated = len(changes["updated"])
-
             # On fresh install, show existing files that Phase 0 will wipe.
             existing_files: list[str] = []
             if self.fresh_install and self.modpack_dir is not None:
@@ -1304,7 +1300,20 @@ class UpdaterApp(tk.Tk):
                     if category_dir.is_dir():
                         for f in sorted(category_dir.iterdir(), key=lambda p: p.name.lower()):
                             existing_files.append(f.name)
-            num_removed = len(existing_files) if self.fresh_install else len(changes["removed"])
+
+            if self.fresh_install:
+                changes     = diff_snapshots(self.old_snapshot, self.new_snapshot)
+                num_added   = len(changes["added"])
+                num_updated = 0
+                num_removed = len(existing_files)
+            else:
+                _plan         = self.update_plan
+                added_names   = sorted([name for _, _, name, is_upd in _plan["download"] if not is_upd], key=str.lower)
+                updated_names = sorted([name for _, _, name, is_upd in _plan["download"] if is_upd], key=str.lower)
+                removed_names = sorted([name for _, name in _plan["delete"]], key=str.lower)
+                num_added   = len(added_names)
+                num_updated = len(updated_names)
+                num_removed = len(removed_names)
 
             stats_row = tk.Frame(frame, bg=DARK_BG)
             stats_row.pack()
@@ -1385,27 +1394,27 @@ class UpdaterApp(tk.Tk):
             else:
                 text.insert("end", "Added\n", "section_added")
                 text.insert("end", "\n")
-                if changes["added"]:
-                    for _, entry in changes["added"]:
-                        text.insert("end", f"  - {entry['name']}\n", "added")
+                if added_names:
+                    for name in added_names:
+                        text.insert("end", f"  - {name}\n", "added")
                 else:
                     text.insert("end", "  No mods added.\n", "placeholder")
                 text.insert("end", "\n")
 
                 text.insert("end", "Removed\n", "section_removed")
                 text.insert("end", "\n")
-                if changes["removed"]:
-                    for _, entry in changes["removed"]:
-                        text.insert("end", f"  - {entry['name']}\n", "removed")
+                if removed_names:
+                    for name in removed_names:
+                        text.insert("end", f"  - {name}\n", "removed")
                 else:
                     text.insert("end", "  No mods removed.\n", "placeholder")
                 text.insert("end", "\n")
 
                 text.insert("end", "Updated\n", "section_updated")
                 text.insert("end", "\n")
-                if changes["updated"]:
-                    for _, _, new_entry in changes["updated"]:
-                        text.insert("end", f"  - {new_entry['name']}\n", "updated")
+                if updated_names:
+                    for name in updated_names:
+                        text.insert("end", f"  - {name}\n", "updated")
                 else:
                     text.insert("end", "  No mods updated.\n", "placeholder")
 

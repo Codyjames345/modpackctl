@@ -287,11 +287,12 @@ def print_changelog(
     new_snapshot: dict,
     fresh: bool = False,
     mods_dir: Path | None = None,
+    plan: dict | None = None,
 ) -> None:
     """Print a human-readable changelog between two snapshots."""
-    changes = diff_snapshots(old_snapshot, new_snapshot)
 
     if fresh:
+        changes = diff_snapshots(old_snapshot, new_snapshot)
         if changes["added"]:
             print(f"\n  To Download ({len(changes['added'])}):")
             for _, entry in changes["added"]:
@@ -299,31 +300,57 @@ def print_changelog(
         else:
             print("\n  To Download: (none)")
 
-        existing_files: list[str] = []
-        if mods_dir is not None and mods_dir.is_dir():
-            existing_files = sorted(f.name for f in mods_dir.iterdir() if f.is_file())
-        if existing_files:
-            print(f"\n  To Delete ({len(existing_files)}):")
-            for filename in existing_files:
-                print(f"    - {filename}")
+        if plan is not None:
+            to_delete = sorted(name for _, name in plan["delete"])
+            if to_delete:
+                print(f"\n  To Delete ({len(to_delete)}):")
+                for name in to_delete:
+                    print(f"    - {name}")
+            else:
+                print("\n  To Delete: (none)")
         else:
-            print("\n  To Delete: (none)")
+            existing_files: list[str] = []
+            if mods_dir is not None and mods_dir.is_dir():
+                existing_files = sorted(f.name for f in mods_dir.iterdir() if f.is_file())
+            if existing_files:
+                print(f"\n  To Delete ({len(existing_files)}):")
+                for filename in existing_files:
+                    print(f"    - {filename}")
+            else:
+                print("\n  To Delete: (none)")
+    elif plan is not None:
+        added   = sorted([name for _, _, name, is_upd in plan["download"] if not is_upd], key=str.lower)
+        removed = sorted([name for _, name in plan["delete"]], key=str.lower)
+        updated = sorted([name for _, _, name, is_upd in plan["download"] if is_upd], key=str.lower)
+
+        if added:
+            print(f"\n  Added ({len(added)}):")
+            for name in added:
+                print(f"    + {name}")
+        if removed:
+            print(f"\n  Removed ({len(removed)}):")
+            for name in removed:
+                print(f"    - {name}")
+        if updated:
+            print(f"\n  Updated ({len(updated)}):")
+            for name in updated:
+                print(f"    ~ {name}")
+        if not added and not removed and not updated:
+            print("\n  No changes.")
     else:
+        changes = diff_snapshots(old_snapshot, new_snapshot)
         if changes["added"]:
             print(f"\n  Added ({len(changes['added'])}):")
             for _, entry in changes["added"]:
                 print(f"    + {entry['name']}")
-
         if changes["removed"]:
             print(f"\n  Removed ({len(changes['removed'])}):")
             for _, entry in changes["removed"]:
                 print(f"    - {entry['name']}")
-
         if changes["updated"]:
             print(f"\n  Updated ({len(changes['updated'])}):")
             for _, old_entry, new_entry in changes["updated"]:
                 print(f"    ~ {new_entry['name']}")
-
         total = len(changes["added"]) + len(changes["removed"]) + len(changes["updated"])
         if total == 0:
             print("\n  No changes.")
@@ -489,16 +516,17 @@ def main() -> None:
                 sys.exit(1)
             old_snapshot = filter_for_server(old_raw_snapshot, client_only_ids)
 
-    # ---- Show changelog ----
-    print("\nChanges:")
-    print_changelog(old_snapshot, new_snapshot, fresh=fresh, mods_dir=mods_dir)
-
+    # ---- Build plan ----
+    mods_dir.mkdir(parents=True, exist_ok=True)
     plan = build_update_plan(old_snapshot, new_snapshot, mods_dir)
-
     if fresh:
         for existing in mods_dir.iterdir():
             if existing.is_file():
                 plan["delete"].append((existing, existing.stem))
+
+    # ---- Show changelog ----
+    print("\nChanges:")
+    print_changelog(old_snapshot, new_snapshot, fresh=fresh, plan=plan)
 
     if not plan["download"] and not plan["delete"]:
         print("\n[OK] Nothing to change.")
@@ -522,8 +550,6 @@ def main() -> None:
             sys.exit(0)
 
     # ---- Apply: download to temp, then atomic move ----
-    mods_dir.mkdir(parents=True, exist_ok=True)
-
     failed_downloads: list[str] = []
 
     if plan["download"]:

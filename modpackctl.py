@@ -185,13 +185,31 @@ def _init_git_repo() -> None:
 
 def _init_working_dir() -> None:
     """
-    If no modpackctl.toml exists in the current directory, prompt the user to initialize
-    a working directory here. On confirmation, copies modpackctl.example.toml and both
-    updater templates from the script directory, initializes a git repo, then exits so
-    the user can edit the config.
+    Ensure the current working directory contains modpackctl.toml before any command runs.
+
+    If the config is not in the CWD, checks whether a parent directory in the same git
+    repo has one and silently changes to it. Falls back to prompting the user to
+    initialise a new working directory if no config can be found.
     """
     if CONFIG_FILE.exists():
         return
+
+    # Walk up through parent directories looking for modpackctl.toml.
+    # Stop once we reach a directory that contains .git (the repo root),
+    # or the filesystem root if there is no git repo.
+    current = Path.cwd()
+    while True:
+        parent = current.parent
+        if parent == current:   # filesystem root — give up
+            break
+        if (parent / CONFIG_FILE).exists():
+            os.chdir(parent)
+            print(f"[INFO] Working directory: {parent}")
+            return
+        current = parent
+        if (current / ".git").is_dir():  # stop at repo root
+            break
+
     print(f"No {CONFIG_FILE} found in the current directory.")
     answer = input("Initialize a working directory here? (This will also create a git repo.) [y/N] ").strip().lower()
     if answer not in ("y", "yes"):
@@ -683,6 +701,20 @@ def bump_major(version: str) -> str:
 # -------------------------
 # FILENAME GUESSING
 # -------------------------
+
+
+def _resolve_remote_filename(project_id: str, file_id: str) -> str:
+    """
+    Follow the CurseForge download redirect to learn the filename without downloading the file.
+    Returns an empty string on any network or parsing error.
+    """
+    url = f"https://www.curseforge.com/api/v1/mods/{project_id}/files/{file_id}/download"
+    try:
+        response = requests.get(url, headers=HEADERS, allow_redirects=True, stream=True, timeout=10)
+        response.close()
+        return guess_filename(response, project_id, file_id)
+    except Exception:
+        return ""
 
 
 def guess_filename(response: requests.Response, project_id: str, file_id: str) -> str:
@@ -1494,21 +1526,36 @@ def _write_pages_assets(dest: Path) -> None:
     for log_entry in load_log():
         commit_id    = log_entry["commit"]
         snapshot_out = snapshots_dir / f"{commit_id}.json"
+
         if snapshot_out.exists():
-            continue
-        snapshot_data = load_snapshot(commit_id)
+            snapshot_data = json.loads(snapshot_out.read_text(encoding="utf-8"))
+            all_complete = all(
+                not isinstance(entry, dict) or (entry.get("file") and entry.get("category"))
+                for entry in snapshot_data.values()
+            )
+            if all_complete:
+                continue
+        else:
+            snapshot_data = load_snapshot(commit_id)
+
         resolved_any = False
         for project_id, entry in snapshot_data.items():
-            if not isinstance(entry, dict) or entry.get("category"):
+            if not isinstance(entry, dict) or (entry.get("file") and entry.get("category")):
                 continue
-            file_id    = str(entry.get("file_id", ""))
+            file_id     = str(entry.get("file_id", ""))
             cached_path = _cached_jar_path(project_id, file_id)
             if cached_path:
-                entry["category"] = classify_mod_file(cached_path)
+                if not entry.get("category"):
+                    entry["category"] = classify_mod_file(cached_path)
                 if not entry.get("file"):
                     entry["file"] = cached_path.name.split("_", 2)[2]
             else:
-                entry["category"] = "mods"
+                if not entry.get("category"):
+                    entry["category"] = "mods"
+                if not entry.get("file") and file_id:
+                    resolved = _resolve_remote_filename(project_id, file_id)
+                    if resolved:
+                        entry["file"] = resolved
             resolved_any = True
         if resolved_any:
             save_snapshot(commit_id, snapshot_data)
@@ -2009,33 +2056,36 @@ def _ensure_files(*targets: Path) -> None:
             print(f"[INFO] Copied {example_name} → {target.name} — you can customise it for this modpack.")
 
 
-def reset_file(server: bool = False, config: bool = False) -> None:
+def reset_file(client: bool = False, server: bool = False, config: bool = False, all_files: bool = False) -> None:
+    if all_files:
+        client = server = config = True
+
+    tasks: list[tuple[Path, str, bool]] = []
+    if client:
+        tasks.append((CLIENT_UPDATE_SCRIPT, f"{CLIENT_UPDATE_SCRIPT.stem}.example{CLIENT_UPDATE_SCRIPT.suffix}", False))
+    if server:
+        tasks.append((SERVER_UPDATE_SCRIPT, f"{SERVER_UPDATE_SCRIPT.stem}.example{SERVER_UPDATE_SCRIPT.suffix}", False))
     if config:
-        src = _ensure_example(CONFIG_EXAMPLE.name)
-        if src is None:
-            print(f"[ERROR] Could not obtain {CONFIG_EXAMPLE.name}.")
-            sys.exit(1)
-        answer = input(f"Overwrite {CONFIG_FILE} with {CONFIG_EXAMPLE.name}? This will erase your current config. [y/N] ").strip().lower()
+        tasks.append((CONFIG_FILE, CONFIG_EXAMPLE.name, True))
+
+    for target, example_name, is_config in tasks:
+        if is_config:
+            prompt = f"Overwrite {target} with {example_name}? This will erase your current config. [y/N] "
+        else:
+            if not target.exists():
+                print(f"[INFO] {target.name} does not exist — skipping.")
+                continue
+            prompt = f"Delete {target.name} and replace with {example_name}? [y/N] "
+        answer = input(prompt).strip().lower()
         if answer not in ("y", "yes"):
             print("[INFO] Aborted.")
             sys.exit(0)
-        shutil.copy2(src, CONFIG_FILE)
-        print(f"[OK] {CONFIG_FILE} reset from {CONFIG_EXAMPLE.name}.")
-    else:
-        target       = SERVER_UPDATE_SCRIPT if server else CLIENT_UPDATE_SCRIPT
-        example_name = f"{target.stem}.example{target.suffix}"
-        if not target.exists():
-            print(f"[INFO] {target.name} does not exist — nothing to remove.")
-            return
-        answer = input(f"Delete {target.name} and replace with {example_name}? [y/N] ").strip().lower()
-        if answer not in ("y", "yes"):
-            print("[INFO] Aborted.")
-            sys.exit(0)
-        target.unlink()
         src = _ensure_example(example_name)
         if src is None:
             print(f"[ERROR] Could not obtain {example_name}.")
             sys.exit(1)
+        if not is_config:
+            target.unlink(missing_ok=True)
         shutil.copy2(src, target)
         print(f"[OK] Reset {target.name} from {example_name}.")
 
@@ -2296,7 +2346,7 @@ if __name__ == "__main__":
 
     # publish
     parser_publish = subparsers.add_parser("publish", help="Build a client release and publish to GitHub")
-    parser_publish.add_argument("version", help="Version to publish")
+    parser_publish.add_argument("version", nargs="?", default=None, help="Version to publish (default: latest)")
     parser_publish.add_argument("--message", metavar="MESSAGE", default="", help="Release note (overrides the message set at commit time)")
 
     # update
@@ -2316,10 +2366,12 @@ if __name__ == "__main__":
     parser_bake.add_argument("--server", action="store_true", help="Bake server-updater.py instead of client-updater.py (no exe)")
 
     # reset-file
-    parser_reset_tmpl = subparsers.add_parser("reset-file", help="Reset an example file in the current directory")
-    parser_reset_file_group = parser_reset_tmpl.add_mutually_exclusive_group()
-    parser_reset_file_group.add_argument("--server", action="store_true", help="Delete server-updater.example.py (restored from bundled copy on next bake)")
+    parser_reset_tmpl = subparsers.add_parser("reset-file", help="Reset a template file in the current directory")
+    parser_reset_file_group = parser_reset_tmpl.add_mutually_exclusive_group(required=True)
+    parser_reset_file_group.add_argument("--client", action="store_true", help="Overwrite client-updater.py from the bundled example")
+    parser_reset_file_group.add_argument("--server", action="store_true", help="Overwrite server-updater.py from the bundled example")
     parser_reset_file_group.add_argument("--config", action="store_true", help="Overwrite modpackctl.toml with modpackctl.example.toml")
+    parser_reset_file_group.add_argument("--all", dest="all_files", action="store_true", help="Overwrite all three files")
 
     # build-exe
     subparsers.add_parser("build-exe", help="Build releases/client-updater.exe from the baked client updater")
@@ -2371,7 +2423,14 @@ if __name__ == "__main__":
             release_client(args.version)
 
     elif args.command == "publish":
-        publish(args.version, message=args.message)
+        version = args.version
+        if version is None:
+            log = load_log()
+            if not log:
+                print("[ERROR] No committed versions found.")
+                sys.exit(1)
+            version = log[-1]["version"]
+        publish(version, message=args.message)
 
     elif args.command == "update":
         if args.server:
@@ -2405,5 +2464,5 @@ if __name__ == "__main__":
             sys.exit(1)
 
     elif args.command == "reset-file":
-        reset_file(args.server, args.config)
+        reset_file(client=args.client, server=args.server, config=args.config, all_files=args.all_files)
 
