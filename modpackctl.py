@@ -80,13 +80,40 @@ _LOADER_DISPLAY_NAMES: dict[str, str] = {
 # CONFIG
 # -------------------------
 
+def _check_config_placeholders(cfg: dict) -> None:
+    """Exit with a clear message if any required config values still contain unedited placeholder text."""
+    github   = cfg.get("github",   {})
+    settings = cfg.get("settings", {})
+    unfilled = [
+        (label, value)
+        for label, value in [
+            ("[github] user",            github.get("user",           "")),
+            ("[github] repo",            github.get("repo",           "")),
+            ("[settings] modpack_name",  settings.get("modpack_name", "")),
+        ]
+        if isinstance(value, str) and "<" in value
+    ]
+    if unfilled:
+        print(f"[ERROR] {CONFIG_FILE} still has unfilled placeholder values:")
+        for label, value in unfilled:
+            print(f"  {label} = \"{value}\"")
+        print(f"\nEdit {CONFIG_FILE} and replace each placeholder before running modpackctl.")
+        sys.exit(1)
+
+
 def load_config() -> dict:
-    """Load and return the TOML config. Exits with an error if the file does not exist."""
+    """Load and return the TOML config. Exits with a clear error if the file is missing, malformed, or has unfilled placeholders."""
     if not CONFIG_FILE.exists():
         print(f"[ERROR] {CONFIG_FILE} not found. Run modpackctl from a working directory, or re-run to initialize one.")
         sys.exit(1)
-    with open(CONFIG_FILE, "rb") as fh:
-        return tomllib.load(fh)
+    try:
+        with open(CONFIG_FILE, "rb") as fh:
+            cfg = tomllib.load(fh)
+    except Exception as exc:
+        print(f"[ERROR] Could not parse {CONFIG_FILE}: {exc}")
+        sys.exit(1)
+    _check_config_placeholders(cfg)
+    return cfg
 
 
 def _download_file_from_repo(filename: str) -> bool:
