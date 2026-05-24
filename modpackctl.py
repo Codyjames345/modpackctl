@@ -1554,6 +1554,21 @@ def _write_pages_assets(dest: Path) -> None:
         if snapshot_out.exists():
             continue
         snapshot_data = load_snapshot(commit_id)
+        resolved_any = False
+        for project_id, entry in snapshot_data.items():
+            if not isinstance(entry, dict) or entry.get("category"):
+                continue
+            file_id    = str(entry.get("file_id", ""))
+            cached_path = _cached_jar_path(project_id, file_id)
+            if cached_path:
+                entry["category"] = classify_mod_file(cached_path)
+                if not entry.get("file"):
+                    entry["file"] = cached_path.name.split("_", 2)[2]
+            else:
+                entry["category"] = "mods"
+            resolved_any = True
+        if resolved_any:
+            save_snapshot(commit_id, snapshot_data)
         snapshot_out.write_text(json.dumps(snapshot_data, indent=2))
 
 

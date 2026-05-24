@@ -119,7 +119,7 @@ def filter_for_server(snapshot: dict, client_only_ids: set[str]) -> dict:
         project_id: entry
         for project_id, entry in snapshot.items()
         if project_id not in client_only_ids
-        and entry.get("category", "mods") == "mods"
+        and (entry.get("category") or "mods") == "mods"
     }
 
 
