@@ -6,7 +6,7 @@ A lightweight CLI for managing a CurseForge modpack across versions, with git-ba
 
 `modpackctl.py` is the pack maintainer's tool. It tracks mod versions by importing CurseForge export zips, generates changelogs, builds client and server release zips, and publishes them to GitHub with a single command.
 
-`{file_prefix}-client-updater.py` (and its compiled `.exe`) ships alongside the release zip. Players double-click it to check for updates and apply them without re-downloading the entire modpack.
+`{file_prefix}-client-updater.py` (and its compiled `.exe`) ships alongside the release zip. Players run it to install the modpack from scratch or apply incremental updates — no release zip required for either case.
 
 ## Prerequisites
 
@@ -298,7 +298,7 @@ To enable exe building, install the build dependencies once: `pip install pyinst
 
 **Distribution:** `publish` uploads up to four assets to the GitHub Release: the modpack zip, the CurseForge export zip, `{file_prefix}-client-updater.py`, and `{file_prefix}-client-updater.exe` (if the PyInstaller build succeeded). `publish` also pushes snapshots to the `gh-pages` branch so the changelog displays real names like "Sodium" instead of project IDs.
 
-- **New players** — download and extract the modpack zip, then download either `{file_prefix}-client-updater.exe` (no Python needed) or `{file_prefix}-client-updater.py` (requires Python 3.8+). Save it anywhere — Desktop, Downloads, etc.
+- **New players** — download `{file_prefix}-client-updater.exe` (no Python needed) or `{file_prefix}-client-updater.py` (requires Python 3.8+) and save it anywhere. The updater handles a fresh install automatically — no modpack zip required. The release zip and CurseForge zip remain available for those who prefer a manual install.
 - **Existing players** — re-run their saved updater; the prefs file remembers the modpack folder.
 
 **Player prefs:** the last-selected modpack folder is saved to `~/.modpack-updater/` (namespaced per modpack).
