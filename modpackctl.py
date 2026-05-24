@@ -33,7 +33,8 @@ _JsonT = TypeVar("_JsonT", list, dict)
 # STORAGE
 # -------------------------
 
-_HERE           = Path(__file__).parent      # directory containing modpackctl.py
+_HERE                 = Path(__file__).parent      # directory containing modpackctl.py
+_MODPACKCTL_RAW_BASE  = "https://raw.githubusercontent.com/Codyjames345/modpackctl/main"
 
 REPO            = Path(".modpackctl")
 SNAPSHOTS       = REPO / "snapshots"
@@ -52,15 +53,6 @@ CONFIG_EXAMPLE   = Path("modpackctl.example.toml")
 CLIENT_UPDATE_SCRIPT = Path("client-updater.py")   # working copy; customise for this modpack
 SERVER_UPDATE_SCRIPT = Path("server-updater.py")   # working copy; customise for this modpack
 _DANCE_DEFAULT_URL  = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
-
-_GITIGNORE_ENTRIES  = [
-    "# Ignore all files/folders by default",
-    "/*",
-    "!/README.md",
-    "!/LICENSE",
-    "!/.gitignore"
-]
-
 
 def _baked_client_updater_path() -> Path:
     """Return releases/{file_prefix}-client-updater.py — the baked client updater output."""
@@ -85,53 +77,6 @@ _LOADER_DISPLAY_NAMES: dict[str, str] = {
 # CONFIG
 # -------------------------
 
-DEFAULT_CONFIG = """\
-[github]
-user = "<yourName>"
-repo = "<yourRepo>"
-
-[settings]
-# Display name shown in the updater GUI and used as the release zip prefix
-modpack_name = "<YourModpackName>"
-
-# Optional: override the zip file prefix if it should differ from modpack_name
-# file_prefix = "<YourModpackName>"
-
-# Modpack author shown in the CurseForge export manifest.json
-# author = "YourName"
-
-# RAM recommended to players in MB (shown in CurseForge launcher, optional)
-# recommended_ram = 8192
-
-# URL to a logo image shown in the updater header and used as the modpack image in CurseForge exports (optional; PNG or GIF)
-# logo_url = "https://example.com/logo.png"
-
-# Whether to include the Konami code easter egg (optional; default: true)
-# enable_secret = false
-
-# YouTube URL for the secret easter egg video (optional; defaults to Never Gonna Give You Up)
-# secret_video_url = "https://www.youtube.com/watch?v=..."
-
-# Whether to show the rainbow effect in the easter egg (optional; default: false)
-# enable_rainbow = true
-
-# Server address shown to players in README.md (used by __SERVER_ADDRESS__ placeholder)
-# server_address = "play.example.com"
-
-# Discord invite URL (used by __DISCORD_URL__ placeholder in README.md)
-# discord_url = "https://discord.gg/yourInvite"
-
-# Live map URL (used by __MAP_URL__ placeholder in README.md)
-# map_url = "https://map.example.com"
-
-# List project IDs to exclude from client releases (server-side only mods)
-server_only = []
-
-# List project IDs to exclude from server releases (client-side only mods)
-client_only = []
-"""
-
-
 def load_config() -> dict:
     """Load and return the TOML config. Exits with an error if the file does not exist."""
     if not CONFIG_FILE.exists():
@@ -139,6 +84,35 @@ def load_config() -> dict:
         sys.exit(1)
     with open(CONFIG_FILE, "rb") as fh:
         return tomllib.load(fh)
+
+
+def _download_file_from_repo(filename: str) -> bool:
+    """Download filename from the modpackctl GitHub repo into _HERE. Returns True on success."""
+    url  = f"{_MODPACKCTL_RAW_BASE}/{filename}"
+    dest = _HERE / filename
+    try:
+        response = requests.get(url, headers=HEADERS, timeout=15)
+        response.raise_for_status()
+        dest.write_bytes(response.content)
+        print(f"[OK] Downloaded {filename} from modpackctl repo.")
+        return True
+    except Exception as exc:
+        print(f"[WARN] Could not download {filename}: {exc}")
+        return False
+
+
+def _ensure_example(example_name: str) -> Path | None:
+    """
+    Return the path to the bundled example file in the modpackctl install directory,
+    downloading it from the modpackctl GitHub repo if it is not present locally.
+    Returns None if the file could not be obtained.
+    """
+    src = _HERE / example_name
+    if not src.exists():
+        print(f"[INFO] {example_name} not found locally — downloading from modpackctl repo...")
+        if not _download_file_from_repo(example_name):
+            return None
+    return src
 
 
 def _init_git_repo() -> None:
@@ -156,17 +130,23 @@ def _init_git_repo() -> None:
         subprocess.run(["git", "init"], check=True)
         print("[OK] Initialized git repository.")
 
+    gitignore_example = _ensure_example("example.gitignore")
+
     gitignore = Path(".gitignore")
-    if not gitignore.exists():
-        gitignore.write_text("\n".join(_GITIGNORE_ENTRIES) + "\n", encoding="utf-8")
-        print("[OK] Created .gitignore.")
+    if gitignore_example is not None:
+        entries = gitignore_example.read_text(encoding="utf-8").splitlines()
+        if not gitignore.exists():
+            shutil.copy2(gitignore_example, gitignore)
+            print("[OK] Created .gitignore.")
+        else:
+            existing_lines = set(gitignore.read_text(encoding="utf-8").splitlines())
+            missing = [e for e in entries if e not in existing_lines]
+            if missing:
+                with open(gitignore, "a", encoding="utf-8") as fh:
+                    fh.write("\n".join(missing) + "\n")
+                print("[OK] Updated .gitignore with modpackctl entries.")
     else:
-        existing_lines = set(gitignore.read_text(encoding="utf-8").splitlines())
-        missing = [e for e in _GITIGNORE_ENTRIES if e not in existing_lines]
-        if missing:
-            with open(gitignore, "a", encoding="utf-8") as fh:
-                fh.write("\n".join(missing) + "\n")
-            print("[OK] Updated .gitignore with modpackctl entries.")
+        print("[WARN] Could not obtain example.gitignore — skipping .gitignore setup.")
 
     if not already_git:
         print("[INFO] Once you've created the GitHub repo and edited the config, add a remote:")
@@ -187,14 +167,7 @@ def _init_working_dir() -> None:
     if answer not in ("y", "yes"):
         print("[INFO] Aborted.")
         sys.exit(0)
-    src_config = _HERE / CONFIG_EXAMPLE.name
-    if src_config.exists():
-        shutil.copy2(src_config, CONFIG_FILE)
-        print(f"[OK] Copied {CONFIG_EXAMPLE.name} → {CONFIG_FILE}")
-    else:
-        CONFIG_FILE.write_text(DEFAULT_CONFIG, encoding="utf-8")
-        print(f"[OK] Created {CONFIG_FILE} with defaults.")
-    _ensure_files(CLIENT_UPDATE_SCRIPT, SERVER_UPDATE_SCRIPT)
+    _ensure_files(CONFIG_FILE, CLIENT_UPDATE_SCRIPT, SERVER_UPDATE_SCRIPT)
     _init_git_repo()
     print(f"\nWorking directory initialized. Edit {CONFIG_FILE} then re-run your command.")
     sys.exit(0)
@@ -2002,16 +1975,19 @@ def _ensure_files(*targets: Path) -> None:
             print(f"[INFO] Using existing {target.name}")
         else:
             example_name = f"{target.stem}.example{target.suffix}"
-            source = _HERE / example_name
+            source = _ensure_example(example_name)
+            if source is None:
+                print(f"[ERROR] Could not obtain {example_name} — skipping {target.name}.")
+                continue
             shutil.copy2(source, target)
             print(f"[INFO] Copied {example_name} → {target.name} — you can customise it for this modpack.")
 
 
 def reset_file(server: bool = False, config: bool = False) -> None:
     if config:
-        src = _HERE / CONFIG_EXAMPLE.name
-        if not src.exists():
-            print(f"[ERROR] Bundled {CONFIG_EXAMPLE.name} not found.")
+        src = _ensure_example(CONFIG_EXAMPLE.name)
+        if src is None:
+            print(f"[ERROR] Could not obtain {CONFIG_EXAMPLE.name}.")
             sys.exit(1)
         answer = input(f"Overwrite {CONFIG_FILE} with {CONFIG_EXAMPLE.name}? This will erase your current config. [y/N] ").strip().lower()
         if answer not in ("y", "yes"):
@@ -2020,7 +1996,7 @@ def reset_file(server: bool = False, config: bool = False) -> None:
         shutil.copy2(src, CONFIG_FILE)
         print(f"[OK] {CONFIG_FILE} reset from {CONFIG_EXAMPLE.name}.")
     else:
-        target      = SERVER_UPDATE_SCRIPT if server else CLIENT_UPDATE_SCRIPT
+        target       = SERVER_UPDATE_SCRIPT if server else CLIENT_UPDATE_SCRIPT
         example_name = f"{target.stem}.example{target.suffix}"
         if not target.exists():
             print(f"[INFO] {target.name} does not exist — nothing to remove.")
@@ -2030,7 +2006,10 @@ def reset_file(server: bool = False, config: bool = False) -> None:
             print("[INFO] Aborted.")
             sys.exit(0)
         target.unlink()
-        src = _HERE / example_name
+        src = _ensure_example(example_name)
+        if src is None:
+            print(f"[ERROR] Could not obtain {example_name}.")
+            sys.exit(1)
         shutil.copy2(src, target)
         print(f"[OK] Reset {target.name} from {example_name}.")
 
@@ -2323,9 +2302,6 @@ if __name__ == "__main__":
     parser_export_cf = subparsers.add_parser("export-cf", help="Build a CurseForge-format modpack zip for a version")
     parser_export_cf.add_argument("version", help="Version to export")
 
-    # export-example
-    subparsers.add_parser("export-example", help="Write modpackctl.example.toml from the built-in defaults")
-
     if argcomplete:
         argcomplete.autocomplete(parser)
     args = parser.parse_args()
@@ -2405,6 +2381,3 @@ if __name__ == "__main__":
     elif args.command == "reset-file":
         reset_file(args.server, args.config)
 
-    elif args.command == "export-example":
-        CONFIG_EXAMPLE.write_text(DEFAULT_CONFIG, encoding="utf-8")
-        print(f"[OK] Written to {CONFIG_EXAMPLE}")

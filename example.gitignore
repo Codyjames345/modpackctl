@@ -1,0 +1,6 @@
+# Ignore all files/folders by default
+/*
+
+!/README.md
+!/LICENSE
+!/.gitignore

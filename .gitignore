@@ -15,3 +15,6 @@
 
 # Ignore pre-populated config file
 /modpackctl.toml
+
+# Ignore xml cache files
+/*.xml

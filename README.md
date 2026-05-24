@@ -114,7 +114,7 @@ After this, `modpackctl <Tab>` completes subcommands and `modpackctl <command> <
 
 2. Export your modpack from CurseForge (the `.zip` file) and note its path.
 
-3. Run the `init` command. Because no `modpackctl.toml` exists yet, modpackctl will prompt you to initialize the working directory first — this creates `modpackctl.toml` and a git repo, then exits:
+3. Run the `init` command. Because no `modpackctl.toml` exists yet, modpackctl will prompt you to initialize the working directory first — this copies `modpackctl.example.toml` → `modpackctl.toml`, copies the updater templates, and creates a git repo, then exits. If any of the example files are missing from the modpackctl install directory they are downloaded from the modpackctl GitHub repo automatically:
 
 ```
 modpackctl init MyModpack-1.0.0.zip
@@ -123,7 +123,7 @@ modpackctl init MyModpack-1.0.0.zip
 ```
 No modpackctl.toml found in the current directory.
 Initialize a working directory here? (This will also create a git repo.) [y/N] y
-[OK] Copied modpackctl.example.toml → modpackctl.toml
+[INFO] Copied modpackctl.example.toml → modpackctl.toml — you can customise it for this modpack.
 ...
 Working directory initialized. Edit modpackctl.toml then re-run your command.
 ```
@@ -220,10 +220,9 @@ python modpackctl.py publish 1.2.0 --message "Improved performance and fixed cra
 | `purge [--all]` | Remove stale files from the download cache. Without `--all`, only removes mods not in the latest snapshot. |
 | `build-pages` | Write `versions.json` and `snapshots/` to a local `gh-pages/` folder. Useful for manually pushing to `gh-pages` if `publish` fails. |
 | `bake-updater [--server]` | Bake `releases/{file_prefix}-client-updater.py` from the client updater template. `--server` bakes `releases/{file_prefix}-server-updater.py` instead (no exe). |
-| `reset-file [--server\|--config]` | Reset an example file in the current directory. Default deletes `client-updater.example.py` so the next bake restores the bundled copy. `--server` does the same for `server-updater.example.py`. `--config` overwrites `modpackctl.toml` with `modpackctl.example.toml`. |
+| `reset-file [--server\|--config]` | Reset a working copy in the current directory from its example template. Default overwrites `client-updater.py` with `client-updater.example.py`. `--server` does the same for `server-updater.py`. `--config` overwrites `modpackctl.toml` with `modpackctl.example.toml`. If the example template is missing from the modpackctl install directory it is downloaded from the modpackctl GitHub repo automatically. |
 | `build-exe` | Build `releases/{file_prefix}-client-updater.exe` from the baked client updater using PyInstaller. When `enable_secret` is true, also downloads and bundles the easter egg video and audio. Requires `pip install pyinstaller yt-dlp imageio-ffmpeg Pillow`. Also runs automatically as part of `release`. |
 | `export-cf <version>` | Build a CurseForge-format modpack zip for the given version, suitable for importing directly into the CurseForge launcher. Includes `manifest.json`, `modlist.html`, and the stored overrides with `bcc-common.toml` stamped with the correct version. |
-| `export-example` | Write the built-in config template to `modpackctl.example.toml`. |
 
 ## Version Bumping
 
