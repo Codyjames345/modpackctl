@@ -215,7 +215,7 @@ python modpackctl.py publish 1.2.0 --message "Improved performance and fixed cra
 | `changelog <v1> [--out output.md] [--server]` | Generate a client changelog for `v1` as an initial release. `--server` excludes client-only mods, shaderpacks, and resourcepacks. |
 | `changelog <v1> <v2> [--out output.md] [--server]` | Generate a client changelog between two versions. `--server` excludes client-only mods, shaderpacks, and resourcepacks. |
 | `release <version> [--server]` | Build a client release zip and CurseForge export zip, bake `releases/{file_prefix}-client-updater.py`, and build `releases/{file_prefix}-client-updater.exe` (if PyInstaller is available). `--server` builds a server release zip and bakes `releases/{file_prefix}-server-updater.py` instead (no exe, no CurseForge zip). |
-| `publish <version> [--message "..."]` | Build a client release, create a GitHub Release with client-filtered changelog notes, and push `versions.json` and `snapshots/` to `gh-pages`. Uploads the zip, baked `.py`, and `.exe` (if built). `--message` overrides the message set at `commit` time. |
+| `publish <version> [--message "..."]` | Build a client release, create a GitHub Release with client-filtered changelog notes, push `versions.json` and `snapshots/` to `gh-pages`, and push an updated `README.md` and `.gitignore` to the working repo. Uploads the zip, baked `.py`, and `.exe` (if built). `--message` overrides the message set at `commit` time. |
 | `update <version> [--server]` | Rebuild the `build/` folder for a version without zipping. Defaults to client view; `--server` excludes client-only mods, shaderpacks, and resourcepacks. |
 | `purge [--all]` | Remove stale files from the download cache. Without `--all`, only removes mods not in the latest snapshot. |
 | `build-pages` | Write `versions.json` and `snapshots/` to a local `gh-pages/` folder. Useful for manually pushing to `gh-pages` if `publish` fails. |
@@ -235,7 +235,11 @@ Versions follow `major.minor.patch`. The next version is calculated automaticall
 
 ## README Auto-Update
 
-Place any of the following placeholders in your `README.md` and modpackctl will substitute them automatically when you run `update` (or any command that calls it, such as `release` or `publish`). Server builds (`--server`) never touch the README.
+Place any of the following placeholders in `README.template.md`. Each time `publish` runs (or any command that calls `update`, such as `release`) it renders a fresh `README.md` from the template with all current values substituted. `README.template.md` is never overwritten by modpackctl and is not committed to the repo — only the rendered `README.md` is pushed. Server builds (`--server`) never touch the README.
+
+If `README.template.md` does not exist when `publish` runs, it is created automatically from the bundled `README.example.md` (downloading it from the modpackctl GitHub repo if needed).
+
+Supported placeholders:
 
 | Placeholder | Replaced with |
 |---|---|
@@ -251,7 +255,7 @@ Place any of the following placeholders in your `README.md` and modpackctl will 
 | `__DISCORD_URL__` | `settings.discord_url` from `modpackctl.toml` |
 | `__MAP_URL__` | `settings.map_url` from `modpackctl.toml` |
 
-A `README.example.md` is included in the modpackctl directory as a starting point.
+`README.example.md` in the modpackctl directory is the default starting template.
 
 ## Player Updater
 

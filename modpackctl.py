@@ -47,6 +47,7 @@ CONFIG_FILE     = Path("modpackctl.toml")
 BUILD            = Path("build")
 RELEASES         = Path("releases")
 README           = Path("README.md")
+README_TEMPLATE  = Path("README.template.md")
 PYINSTALLER      = Path(".pyinstaller")
 PAGES_OUTPUT     = Path("gh-pages")
 CONFIG_EXAMPLE   = Path("modpackctl.example.toml")
@@ -736,109 +737,49 @@ def download_mod(project_id: str, file_id: str, force: bool = False) -> dict:
 # -------------------------
 
 
-def _update_readme(version: str) -> bool:
+def _render_readme(version: str) -> bool:
     """
-    Update README.md placeholders for the given committed version.
-
-    Dynamic placeholders are updated whenever the value changes between versions;
-    static placeholders are replaced once and then left alone.
-
-    Dynamic (tracked — updated on modloader/MC version changes):
-      __MODLOADER__          — full modloader id, e.g. neoforge-21.1.229
-      __MODLOADER_TYPE__     — loader name only, e.g. NeoForge
-      __MINECRAFT_VERSION__  — Minecraft version string, e.g. 1.21.1
-
-    Static (one-time — replaced on first build, not tracked after):
-      __MODPACK_NAME__   — settings.modpack_name
-      __RELEASES_URL__   — https://github.com/<user>/<repo>/releases
-      __AUTHOR__         — settings.author
-      __SERVER_ADDRESS__ — settings.server_address
-      __DISCORD_URL__    — settings.discord_url
-      __MAP_URL__        — settings.map_url
-
-    Returns True if README.md was modified.
+    Render README.md by substituting all known placeholders in README.template.md
+    with their current values. The template is left untouched. Returns True if written.
     """
-    if not README.exists():
+    if not README_TEMPLATE.exists():
+        return False
+    log_entry = get_log_entry(version)
+    if not log_entry:
         return False
 
-    log = load_log()
-    entry = next((e for e in log if e["version"] == version), None)
-    if not entry:
-        return False
+    modloader         = log_entry.get("modloader", "")
+    minecraft_version = log_entry.get("minecraft_version", "")
+    loader_prefix     = modloader.split("-")[0] if modloader else ""
+    loader_type       = (_LOADER_DISPLAY_NAMES.get(loader_prefix.lower()) or loader_prefix.capitalize()) if loader_prefix else ""
 
-    new_modloader        = entry.get("modloader", "")
-    new_minecraft        = entry.get("minecraft_version", "")
-    idx                  = log.index(entry)
-    prev                 = log[idx - 1] if idx > 0 else {}
-    old_modloader        = prev.get("modloader", "")
-    old_minecraft        = prev.get("minecraft_version", "")
-    old_version          = prev.get("version", "")
-
-    content  = README.read_text(encoding="utf-8")
-    modified = False
-
-    # Dynamic: __MODLOADER__
-    if new_modloader:
-        if "__MODLOADER__" in content:
-            content  = content.replace("__MODLOADER__", new_modloader)
-            modified = True
-        elif old_modloader and old_modloader != new_modloader and old_modloader in content:
-            content  = content.replace(old_modloader, new_modloader)
-            modified = True
-
-    # Dynamic: __MODLOADER_TYPE__
-    if new_modloader:
-        new_prefix = new_modloader.split("-")[0]
-        new_type   = _LOADER_DISPLAY_NAMES.get(new_prefix.lower()) or new_prefix.capitalize()
-        old_prefix = old_modloader.split("-")[0] if old_modloader else ""
-        old_type   = (_LOADER_DISPLAY_NAMES.get(old_prefix.lower()) or old_prefix.capitalize()) if old_prefix else ""
-        if "__MODLOADER_TYPE__" in content:
-            content  = content.replace("__MODLOADER_TYPE__", new_type)
-            modified = True
-        elif old_type and old_type != new_type and old_type in content:
-            content  = content.replace(old_type, new_type)
-            modified = True
-
-    # Dynamic: __MINECRAFT_VERSION__
-    if new_minecraft:
-        if "__MINECRAFT_VERSION__" in content:
-            content  = content.replace("__MINECRAFT_VERSION__", new_minecraft)
-            modified = True
-        elif old_minecraft and old_minecraft != new_minecraft and old_minecraft in content:
-            content  = content.replace(old_minecraft, new_minecraft)
-            modified = True
-
-    # Dynamic: __LATEST_VERSION__
-    if "__LATEST_VERSION__" in content:
-        content  = content.replace("__LATEST_VERSION__", version)
-        modified = True
-    elif old_version and old_version != version and old_version in content:
-        content  = content.replace(old_version, version)
-        modified = True
-
-    # Static one-time replacements from config
     cfg      = load_config()
     settings = cfg.get("settings", {})
     github   = cfg.get("github", {})
     gh_user  = github.get("user", "")
     gh_repo  = github.get("repo", "")
-    statics  = {
-        "__MODPACK_NAME__":   settings.get("modpack_name", ""),
-        "__FILE_PREFIX__":    settings.get("file_prefix") or settings.get("modpack_name", ""),
-        "__RELEASES_URL__":   f"https://github.com/{gh_user}/{gh_repo}/releases" if gh_user and gh_repo else "",
-        "__AUTHOR__":         settings.get("author", ""),
-        "__SERVER_ADDRESS__": settings.get("server_address", ""),
-        "__DISCORD_URL__":    settings.get("discord_url", ""),
-        "__MAP_URL__":        settings.get("map_url", ""),
-    }
-    for placeholder, value in statics.items():
-        if value and placeholder in content:
-            content  = content.replace(placeholder, value)
-            modified = True
 
-    if modified:
-        README.write_text(content, encoding="utf-8")
-    return modified
+    replacements = {
+        "__MODLOADER__":         modloader,
+        "__MODLOADER_TYPE__":    loader_type,
+        "__MINECRAFT_VERSION__": minecraft_version,
+        "__LATEST_VERSION__":    version,
+        "__MODPACK_NAME__":      settings.get("modpack_name", ""),
+        "__FILE_PREFIX__":       settings.get("file_prefix") or settings.get("modpack_name", ""),
+        "__RELEASES_URL__":      f"https://github.com/{gh_user}/{gh_repo}/releases" if gh_user and gh_repo else "",
+        "__AUTHOR__":            settings.get("author", ""),
+        "__SERVER_ADDRESS__":    settings.get("server_address", ""),
+        "__DISCORD_URL__":       settings.get("discord_url", ""),
+        "__MAP_URL__":           settings.get("map_url", ""),
+    }
+
+    content = README_TEMPLATE.read_text(encoding="utf-8")
+    for placeholder, value in replacements.items():
+        if value:
+            content = content.replace(placeholder, value)
+    README.write_text(content, encoding="utf-8")
+    return True
+
 
 
 def init(source: str, force: bool = False) -> None:
@@ -1215,7 +1156,7 @@ def update(
     print(f"\n[OK] Updated to {label}  ({summary})")
 
     if suffix != "server":
-        if _update_readme(version):
+        if _render_readme(version):
             print(f"  [i] README.md updated.")
 
     return {"downloaded": downloaded, "cached": cached, "failed": failed, "ok": ok}
@@ -1850,10 +1791,65 @@ def build_exe() -> None:
         sys.exit(1)
 
 
+def _push_working_dir(version: str) -> bool:
+    """
+    Ensure .gitignore and README.md are up to date, then commit and push any
+    changes to the working directory's git repo.
+
+    If README.template.md does not exist it is created from the bundled
+    README.example.md (downloading from the modpackctl repo if needed).
+    README.md is then rendered fresh from the template. README.template.md
+    itself is not committed — it is local to the maintainer.
+
+    Returns True on success, False if the push failed.
+    """
+    print("Updating working directory...")
+    _init_git_repo()
+
+    if not README_TEMPLATE.exists():
+        src = _ensure_example("README.example.md")
+        if src:
+            shutil.copy2(src, README_TEMPLATE)
+            print(f"[OK] Created README.template.md — edit it to customise your README.")
+
+    if README_TEMPLATE.exists():
+        if _render_readme(version):
+            print("[OK] README.md rendered from template.")
+    elif not README.exists():
+        print("[WARN] No README.template.md or README.md found — skipping README.")
+
+    files_to_stage = [".gitignore"]
+    if README.exists():
+        files_to_stage.append("README.md")
+    _run(["git", "add", *files_to_stage], capture_output=True)
+
+    try:
+        _run(
+            ["git", "commit", "-m", f"chore: publish v{version}"],
+            check=True, capture_output=True, text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        output = (exc.stdout or "") + (exc.stderr or "")
+        if "nothing to commit" in output:
+            print("[INFO] Working directory already up to date — nothing to commit.")
+        else:
+            print(f"[WARN] git commit failed: {(exc.stderr or '').strip()}")
+            return False
+
+    try:
+        _run(["git", "push"], check=True)
+        print("[OK] Working directory pushed.")
+        return True
+    except subprocess.CalledProcessError:
+        print("[WARN] git push failed — run 'git push' manually if needed.")
+        return False
+
+
 def publish(version: str, message: str = "") -> None:
     """
     Build a fresh client release zip and CurseForge export zip, create a GitHub Release
-    with the generated changelog as release notes, and push updated versions.json to gh-pages.
+    with the generated changelog as release notes, push updated versions.json to gh-pages,
+    and push README.md + .gitignore changes to the working directory's git repo.
     An optional message is included at the top of the release notes.
     Aborts if the version has no client-visible changes (e.g. only server-only mods changed).
     """
@@ -1935,11 +1931,13 @@ def publish(version: str, message: str = "") -> None:
         print("       Run 'python modpackctl.py build-pages' to generate the files locally,")
         print("       then push them to the gh-pages branch manually.")
 
+    repo_ok = _push_working_dir(version)
+
     pages_url   = f"https://{user}.github.io/{repo}/"
     release_url = f"https://github.com/{user}/{repo}/releases/tag/{tag}"
 
     print(f"\n{'=' * 42}")
-    if release_ok and pages_ok:
+    if release_ok and pages_ok and repo_ok:
         print(f" PUBLISH COMPLETE — v{version}")
     else:
         print(f" PUBLISH PARTIAL — v{version} (see errors above)")
