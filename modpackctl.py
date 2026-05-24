@@ -373,7 +373,7 @@ def store_overrides(zip_path: Path | str) -> int:
     replacing any previously stored overrides. Returns the number of files stored.
 
     Inside shaderpacks/, only direct .zip files are stored — extracted shaderpack
-    folders (which Minecraft creates when a player uses them) and other non-zip
+    folders (which Euphoria Patcher creates when a player uses them) and other non-zip
     files are skipped so they don't bloat the overrides bundle.
     """
     zip_path = Path(zip_path)
