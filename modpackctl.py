@@ -974,8 +974,8 @@ def commit(source: str, major: bool = False, message: str = "") -> tuple[str, st
 
 
 def changelog(
-    v1: str,
-    v2: str | None,
+    v1: str | None,
+    v2: str,
     out: str = "changelog.md",
     message: str = "",
     exclude: set[str] | None = None,
@@ -983,15 +983,12 @@ def changelog(
 ) -> None:
     """
     Generate a Markdown changelog between two committed versions and write it to a file.
-    When v2 is None, v1 is treated as an initial release and diffed against an empty state.
+    When v1 is None, v2 is treated as an initial release and diffed against an empty state.
     Includes a Modloader section when the modloader id changed between the two versions.
     An optional message is inserted as a short paragraph below the heading.
     exclude filters out specific project IDs; exclude_categories filters by mod category
     (e.g. 'shaderpacks', 'resourcepacks') using the stored mod index.
     """
-    if v2 is None:
-        v2 = v1
-        v1 = "EMPTY"
 
     new_commit_id = get_commit(v2)
     if not new_commit_id:
@@ -1017,7 +1014,7 @@ def changelog(
             )
         }
 
-    if v1 == "EMPTY":
+    if v1 is None:
         changes       = diff({}, apply_side_filter(load_snapshot(new_commit_id)))
         header_title  = f"# Changelog: {v2} (Initial Release)"
         old_modloader = ""
@@ -1516,7 +1513,7 @@ def _get_notes_file_for_release(version: str, message: str = "", side: str = "")
         changelog(prev_version, version, out=str(notes_path), message=message,
                   exclude=release_exclude, exclude_categories=release_exclude_categories)
     else:
-        changelog(version, None, out=str(notes_path), message=message,
+        changelog(None, version, out=str(notes_path), message=message,
                   exclude=release_exclude, exclude_categories=release_exclude_categories)
 
     return notes_path
@@ -2529,6 +2526,11 @@ if __name__ == "__main__":
 
     elif args.command == "set-message":
         version = args.version
+        message = args.message
+        if version is not None and not args.message and not re.fullmatch(r"\d+\.\d+\.\d+", version):
+            # Single positional arg that isn't a version number — treat it as the message
+            message = version
+            version = None
         if version is None:
             log = load_log()
             if not log:
@@ -2538,27 +2540,37 @@ if __name__ == "__main__":
         if not get_log_entry(version):
             print(f"[ERROR] Version '{version}' not found in log.")
             sys.exit(1)
-        set_version_message(version, args.message)
-        if args.message:
+        set_version_message(version, message)
+        if message:
             print(f"[OK] Message set for v{version}.")
         else:
             print(f"[OK] Message cleared for v{version}.")
 
     elif args.command == "changelog":
         v1 = args.v1
+        v2 = args.v2
         if v1 is None:
             log = load_log()
             if not log:
                 print("[ERROR] No committed versions found.")
                 sys.exit(1)
-            v1 = log[-1]["version"]
+            else:
+                try:
+                    v1 = log[-2]["version"]
+                except IndexError:
+                    v1 = None
+
+            v2 = log[-1]["version"]
+        elif v2 is None:
+            v2 = v1
+            v1 = None
         if args.server:
             cl_exclude            = get_filter_list("client_only")
             cl_exclude_categories = {"shaderpacks", "resourcepacks"}
         else:
             cl_exclude            = get_filter_list("server_only")
             cl_exclude_categories = None
-        changelog(v1, args.v2, out=args.out, message=args.message,
+        changelog(v1, v2, out=args.out, message=args.message,
                   exclude=cl_exclude, exclude_categories=cl_exclude_categories)
 
     elif args.command == "release":
