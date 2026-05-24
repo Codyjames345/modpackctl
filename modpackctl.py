@@ -1292,11 +1292,13 @@ def release(
     print(f"{'=' * 36}\n")
     print(f"[OK] Built {zip_name}")
 
+    build_pages(show_hint=False)
+
     return zip_path
 
 
 def release_client(version: str) -> Path | None:
-    """Build a client release zip and CurseForge export zip, excluding server_only mods, and bake client-updater.example.py."""
+    """Build a client release zip, bake and compile the client updater, and export a CurseForge zip, excluding server_only mods."""
     print(f"Building client release for v{version}...")
     excluded = get_filter_list("server_only")
     if not excluded:
@@ -1312,7 +1314,7 @@ def release_client(version: str) -> Path | None:
 
 
 def release_server(version: str) -> Path | None:
-    """Build a server release zip, excluding client-only mods, shaderpacks, and resourcepacks, and bake server-updater.example.py."""
+    """Build a server release zip and bake the server updater, excluding client_only mods, shaderpacks, and resourcepacks."""
     excluded = get_filter_list("client_only")
     if not excluded:
         print("[WARN] No client_only list found in config — building full release.")
@@ -1568,6 +1570,7 @@ def _push_pages_assets() -> None:
     the branch as an orphan if it does not yet exist. Uses a temporary git
     worktree to avoid switching the working branch.
     """
+    build_pages(show_hint=False)
     print("Pushing versions.json + snapshots to gh-pages...")
     try:
         ls_result     = _run(
@@ -1580,7 +1583,9 @@ def _push_pages_assets() -> None:
             print("[INFO] Creating gh-pages branch...")
             _run(["git", "checkout", "--orphan", "gh-pages"], check=True)
             _run(["git", "rm", "-rf", "--cached", "."], check=True, capture_output=True)
-            _write_pages_assets(Path("."))
+            shutil.copy2(PAGES_OUTPUT / "versions.json", "versions.json")
+            if (PAGES_OUTPUT / "snapshots").exists():
+                shutil.copytree(PAGES_OUTPUT / "snapshots", "snapshots", dirs_exist_ok=True)
             _run(["git", "add", "versions.json", "snapshots"], check=True)
             _run(["git", "commit", "-m", "init: versions.json + snapshots"], check=True)
             _run(["git", "push", "-u", "origin", "gh-pages"], check=True)
@@ -1609,7 +1614,9 @@ def _push_pages_assets() -> None:
                 check=True, capture_output=True,
             )
 
-            _write_pages_assets(worktree_path)
+            shutil.copy2(PAGES_OUTPUT / "versions.json", worktree_path / "versions.json")
+            if (PAGES_OUTPUT / "snapshots").exists():
+                shutil.copytree(PAGES_OUTPUT / "snapshots", worktree_path / "snapshots", dirs_exist_ok=True)
             _run(["git", "add", "versions.json", "snapshots"], check=True, cwd=worktree_path)
 
             try:
@@ -2026,7 +2033,7 @@ def publish(version: str, message: str = "") -> None:
     print(f"  Existing players: run {file_prefix}-client-updater.py (or .exe) from their current install.")
 
 
-def build_pages() -> None:
+def build_pages(show_hint: bool = True) -> None:
     """Write versions.json and snapshots/ to a local gh-pages/ folder for manual publishing."""
     if not REPO.exists():
         print("[ERROR] Repository not initialized. Run 'init' first.")
@@ -2035,7 +2042,8 @@ def build_pages() -> None:
     dest.mkdir(parents=True, exist_ok=True)
     _write_pages_assets(dest)
     print(f"[OK] Built gh-pages assets → {dest}/")
-    print("     Push the contents of this folder to your gh-pages branch.")
+    if show_hint:
+        print("     Push the contents of this folder to your gh-pages branch.")
 
 
 def _ensure_files(*targets: Path) -> None:
