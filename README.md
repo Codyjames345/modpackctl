@@ -20,28 +20,28 @@ To run `modpackctl` from any directory instead of `python /path/to/modpackctl.py
 
 **Windows (CMD or PowerShell):**
 
-Add the modpackctl directory to your `PATH`:
+Add the `commands/` subdirectory to your `PATH`:
 
 1. Open Start → search **"Edit environment variables for your account"**
 2. Select `Path` under User variables → click **Edit** → **New**
-3. Paste the full path to the modpackctl directory (e.g. `C:\Tools\modpackctl`)
+3. Paste the full path to the `commands` subdirectory (e.g. `C:\Tools\modpackctl\commands`)
 4. Click OK and restart your terminal
 
 The included `modpackctl.cmd` is picked up automatically once the directory is in PATH.
 
 **Linux / macOS:**
 
-Make the shell script executable, then either add the directory to your `PATH` or symlink it:
+Make the shell script executable, then either add `commands/` to your `PATH` or symlink the script:
 
 ```bash
-chmod +x /path/to/modpackctl/modpackctl
+chmod +x /path/to/modpackctl/commands/modpackctl
 
-# Option A — add the directory to PATH (edit to match your shell's rc file)
-echo 'export PATH="/path/to/modpackctl:$PATH"' >> ~/.bashrc
+# Option A — add the commands directory to PATH (edit to match your shell's rc file)
+echo 'export PATH="/path/to/modpackctl/commands:$PATH"' >> ~/.bashrc
 source ~/.bashrc
 
 # Option B — symlink into an existing bin directory
-ln -s /path/to/modpackctl/modpackctl ~/.local/bin/modpackctl
+ln -s /path/to/modpackctl/commands/modpackctl ~/.local/bin/modpackctl
 ```
 
 After either option you can run from any modpack directory:
@@ -319,7 +319,7 @@ python server-updater.py [server_dir] [--version VERSION] [--fresh] [--yes] [--w
 | `--fresh` | Wipe the mods folder and re-download everything clean. |
 | `--no-fresh` | Force an incremental update even if no version is detected. |
 | `--yes` | Skip the confirmation prompt (useful for automated deployments). |
-| `--workers N` | Number of parallel download threads (default: 4). |
+| `--workers N` | Number of parallel download workers (default: 10). |
 
 The script detects and records the installed version via `config/bcc-common.toml` (`modpackVersion` field), matching the [Better Compatibility Checker](https://www.curseforge.com/minecraft/mc-mods/better-compatibility-checker) mod format. If the file is absent it is created automatically on the first update. The script defaults to a fresh install if no version is detected.
 
@@ -340,7 +340,6 @@ Use these placeholders as plain string literals anywhere in `server-updater.exam
 ```
 .modpackctl/
   log.json          — version history with diff stats
-  mod_index.json    — current mod list (project_id -> file, category)
   mod_cache.json    — CurseForge API cache (mod names and file names)
   snapshots/        — per-commit mod state (used for diffs and updates)
   overrides/        — stored CurseForge overrides (configs, resource files)

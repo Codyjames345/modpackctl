@@ -33,7 +33,8 @@ _JsonT = TypeVar("_JsonT", list, dict)
 # STORAGE
 # -------------------------
 
-_HERE                 = Path(__file__).parent      # directory containing modpackctl.py
+_HERE                 = Path(__file__).parent           # directory containing modpackctl.py
+_TEMPLATES_DIR        = _HERE / "templates"             # bundled example/template files
 _MODPACKCTL_RAW_BASE  = "https://raw.githubusercontent.com/Codyjames345/modpackctl/main"
 
 REPO            = Path(".modpackctl")
@@ -43,6 +44,7 @@ CACHE           = REPO / "mod_cache.json"    # project_id -> { name, files: { fi
 DL_CACHE        = REPO / "dl_cache"          # permanent jar store keyed by (project_id, file_id)
 OVERRIDES_STORE = REPO / "overrides"
 CONFIG_FILE     = Path("modpackctl.toml")
+GITIGNORE       = Path(".gitignore")
 
 BUILD            = Path("build")
 RELEASES         = Path("releases")
@@ -88,9 +90,10 @@ def load_config() -> dict:
 
 
 def _download_file_from_repo(filename: str) -> bool:
-    """Download filename from the modpackctl GitHub repo into _HERE. Returns True on success."""
-    url  = f"{_MODPACKCTL_RAW_BASE}/{filename}"
-    dest = _HERE / filename
+    """Download filename from templates/ in the modpackctl GitHub repo into _TEMPLATES_DIR. Returns True on success."""
+    url  = f"{_MODPACKCTL_RAW_BASE}/templates/{filename}"
+    dest = _TEMPLATES_DIR / filename
+    _TEMPLATES_DIR.mkdir(exist_ok=True)
     try:
         response = requests.get(url, headers=HEADERS, timeout=15)
         response.raise_for_status()
@@ -104,11 +107,11 @@ def _download_file_from_repo(filename: str) -> bool:
 
 def _ensure_example(example_name: str) -> Path | None:
     """
-    Return the path to the bundled example file in the modpackctl install directory,
+    Return the path to the bundled example file in _TEMPLATES_DIR,
     downloading it from the modpackctl GitHub repo if it is not present locally.
     Returns None if the file could not be obtained.
     """
-    src = _HERE / example_name
+    src = _TEMPLATES_DIR / example_name
     if not src.exists():
         print(f"[INFO] {example_name} not found locally — downloading from modpackctl repo...")
         if not _download_file_from_repo(example_name):
@@ -133,17 +136,16 @@ def _init_git_repo() -> None:
 
     gitignore_example = _ensure_example("example.gitignore")
 
-    gitignore = Path(".gitignore")
     if gitignore_example is not None:
         entries = gitignore_example.read_text(encoding="utf-8").splitlines()
-        if not gitignore.exists():
-            shutil.copy2(gitignore_example, gitignore)
+        if not GITIGNORE.exists():
+            shutil.copy2(gitignore_example, GITIGNORE)
             print("[OK] Created .gitignore.")
         else:
-            existing_lines = set(gitignore.read_text(encoding="utf-8").splitlines())
+            existing_lines = set(GITIGNORE.read_text(encoding="utf-8").splitlines())
             missing = [e for e in entries if e not in existing_lines]
             if missing:
-                with open(gitignore, "a", encoding="utf-8") as fh:
+                with open(GITIGNORE, "a", encoding="utf-8") as fh:
                     fh.write("\n".join(missing) + "\n")
                 print("[OK] Updated .gitignore with modpackctl entries.")
     else:
@@ -1766,13 +1768,12 @@ def _build_exe(source_py: Path) -> Path | None:
 
 def _clear_icon_cache() -> None:
     """Delete Windows icon cache DB files and restart Explorer so the new icon shows immediately."""
-    import glob
     answer = input("Clear Windows icon cache so the new icon appears immediately? (Explorer will restart) [y/N] ").strip().lower()
     if answer not in ("y", "yes"):
         print("[INFO] Skipped icon cache clear — the new icon may not appear.")
         return
     cache_dir = Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "Windows" / "Explorer"
-    db_files  = glob.glob(str(cache_dir / "iconcache_*.db"))
+    db_files  = [str(p) for p in cache_dir.glob("iconcache_*.db")]
     subprocess.run(["taskkill", "/f", "/im", "explorer.exe"], capture_output=True)
     for db_file in db_files:
         try:
@@ -1818,9 +1819,9 @@ def _push_working_dir(version: str) -> bool:
     elif not README.exists():
         print("[WARN] No README.template.md or README.md found — skipping README.")
 
-    files_to_stage = [".gitignore"]
+    files_to_stage = [str(GITIGNORE)]
     if README.exists():
-        files_to_stage.append("README.md")
+        files_to_stage.append(str(README))
     _run(["git", "add", *files_to_stage], capture_output=True)
 
     try:
@@ -2023,7 +2024,7 @@ def bake_client_updater() -> bool:
       __MODPACK_NAME__     — settings.modpack_name from modpackctl.toml
       __LOGO_URL__         — logo URL from modpackctl.toml (empty string if unset)
       __SECRET_VIDEO_URL__ — easter egg video URL (defaults to Never Gonna Give You Up)
-      __ENABLE_RAINBOW__   — True/False; settings.enable_rainbow from modpackctl.toml (default: True)
+      __ENABLE_RAINBOW__   — True/False; settings.enable_rainbow from modpackctl.toml (default: False)
     """
     _ensure_files(CLIENT_UPDATE_SCRIPT)
     if not CLIENT_UPDATE_SCRIPT.exists():
