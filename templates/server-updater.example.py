@@ -35,7 +35,9 @@ GITHUB_REPO  = "__GITHUB_REPO__"
 MODPACK_NAME = "__MODPACK_NAME__"
 VERSIONS_URL  = f"https://{GITHUB_USER}.github.io/{GITHUB_REPO}/versions.json"
 SNAPSHOTS_URL = f"https://{GITHUB_USER}.github.io/{GITHUB_REPO}/snapshots"
-OVERRIDES_URL = f"https://{GITHUB_USER}.github.io/{GITHUB_REPO}/overrides.zip"
+# Override files are version-controlled per commit. The content for a commit lives at
+# {OVERRIDES_URL}/{commit}.zip and its path->hash manifest at {SNAPSHOTS_URL}/{commit}.overrides.json.
+OVERRIDES_URL = f"https://{GITHUB_USER}.github.io/{GITHUB_REPO}/overrides"
 
 if "__" in GITHUB_USER or "__" in GITHUB_REPO:
     print(
@@ -110,10 +112,21 @@ def fetch_snapshot(commit_id: str) -> dict:
     return fetch_json(f"{SNAPSHOTS_URL}/{commit_id}.json")
 
 
-def fetch_overrides_zip() -> bytes | None:
-    """Download overrides.zip from gh-pages. Returns bytes, or None if unavailable."""
+def fetch_override_manifest(commit_id: str) -> dict:
+    """
+    Fetch a commit's override manifest (path -> sha256 hex) from gh-pages.
+    Returns {} when the commit has no overrides or the manifest is unavailable.
+    """
     try:
-        request = urllib.request.Request(OVERRIDES_URL, headers=HEADERS)
+        return fetch_json(f"{SNAPSHOTS_URL}/{commit_id}.overrides.json")
+    except (urllib.error.URLError, OSError, TimeoutError, ValueError):
+        return {}
+
+
+def fetch_overrides_zip(commit_id: str) -> bytes | None:
+    """Download a commit's overrides zip from gh-pages. Returns bytes, or None if unavailable."""
+    try:
+        request = urllib.request.Request(f"{OVERRIDES_URL}/{commit_id}.zip", headers=HEADERS)
         with urllib.request.urlopen(request, timeout=30) as resp:
             return resp.read()
     except urllib.error.HTTPError as exc:
@@ -172,25 +185,84 @@ def diff_snapshots(old: dict, new: dict) -> dict:
 # FILE OPERATIONS
 # -------------------------
 
-def apply_overrides_zip(install_dir: Path, zip_bytes: bytes, new_files_only: bool) -> list[str]:
+def extract_override_members(install_dir: Path, zip_bytes: bytes, paths: list[str]) -> list[str]:
     """
-    Extract overrides from zip_bytes into install_dir.
-    When new_files_only is True, skips files that already exist (preserves custom configs).
+    Extract the given member paths from the override zip into install_dir, overwriting
+    existing files. The caller decides which paths to write, so this never skips.
     Returns a list of relative paths that were written.
     """
+    wanted = set(paths)
     applied: list[str] = []
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
         for member in zf.infolist():
-            if member.is_dir():
+            if member.is_dir() or member.filename not in wanted:
                 continue
             dest_path = install_dir / member.filename
-            if new_files_only and dest_path.exists():
-                continue
             dest_path.parent.mkdir(parents=True, exist_ok=True)
             with zf.open(member) as src, open(dest_path, "wb") as dst:
                 shutil.copyfileobj(src, dst)
             applied.append(member.filename)
     return applied
+
+
+def compute_override_ops(
+    old_manifest: dict,
+    new_manifest: dict,
+    install_dir: Path,
+    fresh: bool,
+    reset_overrides: bool,
+    override_folders: list[str],
+) -> dict:
+    """
+    Plan version-accurate override operations by diffing the previous and target
+    commits' override manifests. Mirrors the client updater's policy:
+      * Files under mods/ (custom mods) are fully synced — added, overwritten when
+        their content changes, and deleted when dropped from the pack.
+      * Other override files default to preserve-edits: only missing files are written,
+        and nothing is overwritten/deleted unless reset (or fresh) wipes the folder.
+    Returns {'write': [zip paths], 'delete': [install-relative paths],
+             'added'/'removed'/'updated': counts for reporting}.
+    """
+    write: list[str]  = []
+    delete: list[str] = []
+    added = removed = updated = 0
+
+    wiped: set[str] = set()
+    if fresh:
+        wiped.update(CATEGORY_DIRS)
+    if reset_overrides:
+        wiped.update(override_folders)
+
+    for path in set(old_manifest) | set(new_manifest):
+        top      = path.split("/", 1)[0] if "/" in path else ""
+        is_mod   = top == "mods"
+        in_old   = path in old_manifest
+        in_new   = path in new_manifest
+        changed  = in_old and in_new and old_manifest[path] != new_manifest[path]
+        exists_locally = (install_dir / path).exists()
+        folder_wiped   = top in wiped
+
+        if in_new:
+            if is_mod:
+                if not in_old:
+                    write.append(path); added += 1
+                elif changed:
+                    write.append(path); updated += 1
+                elif folder_wiped:
+                    write.append(path)
+            else:
+                if folder_wiped or not exists_locally:
+                    write.append(path)
+                    if not in_old:
+                        added += 1
+                    elif changed:
+                        updated += 1
+        else:
+            if is_mod and not folder_wiped and exists_locally:
+                delete.append(path); removed += 1
+
+    return {"write": write, "delete": delete,
+            "added": added, "removed": removed, "updated": updated}
 
 
 def get_override_folders(override_zip: bytes) -> list[str]:
@@ -566,6 +638,10 @@ def main() -> None:
     client_only_ids: set[str] = set(
         str(pid) for pid in versions_data.get("client_only_ids", [])
     )
+    # Client-only custom override mods are dropped from the server install; display
+    # names let custom mods (which the CF API can't resolve) print readably.
+    client_only_overrides: set[str] = set(versions_data.get("client_only_overrides", []))
+    custom_mod_names: dict = versions_data.get("custom_mod_names", {})
 
     available_versions: list[dict] = versions_data.get("versions", [])
     if not available_versions:
@@ -595,13 +671,21 @@ def main() -> None:
     if installed_version is not None and _bare_version(installed_version) == "?":
         fresh = True
 
-    # ---- Fetch overrides early so we know which folders are involved ----
+    # ---- Fetch the target version's overrides (content + manifest) ----
     override_zip: bytes | None = None
     try:
-        override_zip = fetch_overrides_zip()
+        override_zip = fetch_overrides_zip(target_commit)
     except Exception:
         pass
     override_folders: list[str] = get_override_folders(override_zip) if override_zip else []
+
+    def _filter_overrides(manifest: dict) -> dict:
+        if not client_only_overrides:
+            return manifest
+        return {p: h for p, h in manifest.items() if p not in client_only_overrides}
+
+    new_override_manifest = _filter_overrides(fetch_override_manifest(target_commit))
+    old_override_manifest: dict = {}
 
     # Folders wiped on fresh install: category dirs only (override folders are independent).
     fresh_wipe_dirs = list(CATEGORY_DIRS)
@@ -664,6 +748,7 @@ def main() -> None:
                 print(f"[ERROR] Could not fetch snapshot for {_display_version(installed_version)}: {error}")
                 sys.exit(1)
             old_snapshot = filter_for_server(old_raw_snapshot, client_only_ids)
+            old_override_manifest = _filter_overrides(fetch_override_manifest(installed_entry["commit"]))
 
     # ---- Reset overrides prompt (before changelog so it reflects the decision) ----
     reset_overrides = bool(args.reset_overrides)
@@ -677,6 +762,12 @@ def main() -> None:
             print("\n[ERROR] Aborted.")
             sys.exit(0)
 
+    # ---- Plan override operations (version-controlled) ----
+    override_ops = compute_override_ops(
+        old_override_manifest, new_override_manifest, server_dir,
+        fresh=fresh, reset_overrides=reset_overrides, override_folders=override_folders,
+    )
+
     # ---- Build plan ----
     mods_dir.mkdir(parents=True, exist_ok=True)
     plan = build_update_plan(old_snapshot, new_snapshot, mods_dir)
@@ -689,8 +780,13 @@ def main() -> None:
     # ---- Show changelog ----
     print("\nChanges:")
     print_changelog(old_snapshot, new_snapshot, fresh=fresh, plan=plan, install_dir=server_dir)
+    if override_ops["added"] or override_ops["removed"] or override_ops["updated"]:
+        print(
+            f"  Overrides: {override_ops['added']} added, "
+            f"{override_ops['removed']} removed, {override_ops['updated']} updated"
+        )
 
-    if not plan["download"] and not plan["delete"]:
+    if not plan["download"] and not plan["delete"] and not override_ops["write"] and not override_ops["delete"]:
         print("\n[OK] Nothing to change.")
         write_installed_version(server_dir, target_version)
         sys.exit(0)
@@ -764,14 +860,23 @@ def main() -> None:
             except OSError as error:
                 print(f"  [WARN] Could not delete {file_path.name}: {error}")
 
-    # ---- Apply overrides ----
-    if override_zip:
-        applied = apply_overrides_zip(server_dir, override_zip, new_files_only=not reset_overrides)
-        if applied:
-            label = "Resetting overrides:" if reset_overrides else "Applying new override files:"
-            print(f"\n{label}")
-            for rel_path in applied:
-                print(f"  + {rel_path}")
+    # ---- Apply overrides (version-controlled; mods synced, configs preserve-edits) ----
+    for rel in override_ops["delete"]:
+        try:
+            (server_dir / rel).unlink()
+            print(f"  [-] {custom_mod_names.get(rel, rel)}")
+        except OSError as error:
+            print(f"  [WARN] Could not delete {rel}: {error}")
+    if override_ops["write"]:
+        if override_zip is None:
+            print("[WARN] Override content unavailable — override files were not applied.")
+        else:
+            applied = extract_override_members(server_dir, override_zip, override_ops["write"])
+            if applied:
+                label = "Resetting overrides:" if reset_overrides else "Applying override files:"
+                print(f"\n{label}")
+                for rel_path in applied:
+                    print(f"  + {custom_mod_names.get(rel_path, rel_path)}")
 
     write_installed_version(server_dir, target_version)
     print(f"\n[OK] Updated to {MODPACK_NAME} {target_version}")

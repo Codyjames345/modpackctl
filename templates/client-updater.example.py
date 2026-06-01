@@ -54,7 +54,9 @@ MODPACK_NAME = "__MODPACK_NAME__"
 LOGO_URL     = "__LOGO_URL__"
 VERSIONS_URL  = f"https://{GITHUB_USER}.github.io/{GITHUB_REPO}/versions.json"
 SNAPSHOTS_URL = f"https://{GITHUB_USER}.github.io/{GITHUB_REPO}/snapshots"
-OVERRIDES_URL = f"https://{GITHUB_USER}.github.io/{GITHUB_REPO}/overrides.zip"
+# Override files are version-controlled per commit. The content for a commit lives at
+# {OVERRIDES_URL}/{commit}.zip and its path->hash manifest at {SNAPSHOTS_URL}/{commit}.overrides.json.
+OVERRIDES_URL = f"https://{GITHUB_USER}.github.io/{GITHUB_REPO}/overrides"
 
 if "__" in GITHUB_USER or "__" in GITHUB_REPO:
     print(
@@ -226,10 +228,22 @@ def fetch_snapshot(commit_id: str) -> dict:
     return fetch_json(f"{SNAPSHOTS_URL}/{commit_id}.json")
 
 
-def fetch_overrides_zip() -> bytes | None:
-    """Download overrides.zip from gh-pages. Returns bytes, or None if unavailable."""
+def fetch_override_manifest(commit_id: str) -> dict:
+    """
+    Fetch a commit's override manifest (path -> sha256 hex) from gh-pages.
+    Returns {} when the commit has no overrides or the manifest is unavailable
+    (e.g. a pack published before override versioning existed).
+    """
     try:
-        request = urllib.request.Request(OVERRIDES_URL, headers=HEADERS)
+        return fetch_json(f"{SNAPSHOTS_URL}/{commit_id}.overrides.json")
+    except (urllib.error.URLError, OSError, TimeoutError, ValueError):
+        return {}
+
+
+def fetch_overrides_zip(commit_id: str) -> bytes | None:
+    """Download a commit's overrides zip from gh-pages. Returns bytes, or None if unavailable."""
+    try:
+        request = urllib.request.Request(f"{OVERRIDES_URL}/{commit_id}.zip", headers=HEADERS)
         with urllib.request.urlopen(request, timeout=30) as resp:
             return resp.read()
     except urllib.error.HTTPError as exc:
@@ -358,39 +372,63 @@ def download_mod_file(project_id: str, file_id: str, dest_dir: Path) -> Path | N
         return None
 
 
-def apply_overrides_zip(install_dir: Path, zip_bytes: bytes, new_files_only: bool) -> list[str]:
+def extract_override_members(
+    install_dir: Path,
+    zip_bytes: bytes,
+    paths: list[str],
+    on_progress=None,
+    on_error=None,
+) -> list[str]:
     """
-    Extract overrides from zip_bytes into install_dir.
-    When new_files_only is True, skips files that already exist (preserves custom configs).
+    Extract the given member paths from the override zip into install_dir, overwriting
+    any existing files. The caller (the version-aware override planner) decides which
+    paths to write, so this is unconditional — it never skips existing files.
+    on_progress, if given, is called as on_progress(current, total) after every member.
+    on_error, if given, is called as on_error(path, exception) for OSError failures and
+    extraction continues; if not given, OSError propagates and aborts the extraction.
     Returns a list of relative paths that were written.
     """
+    wanted = set(paths)
     applied: list[str] = []
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
-        for member in zf.infolist():
-            if member.is_dir():
-                continue
+        members = [m for m in zf.infolist() if not m.is_dir() and m.filename in wanted]
+        total = len(members)
+        for i, member in enumerate(members, 1):
             dest_path = install_dir / member.filename
-            if new_files_only and dest_path.exists():
-                continue
-            dest_path.parent.mkdir(parents=True, exist_ok=True)
-            with zf.open(member) as src, open(dest_path, "wb") as dst:
-                shutil.copyfileobj(src, dst)
-            applied.append(member.filename)
+            try:
+                dest_path.parent.mkdir(parents=True, exist_ok=True)
+                with zf.open(member) as src, open(dest_path, "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+                applied.append(member.filename)
+            except OSError as exc:
+                if on_error is None:
+                    raise
+                on_error(member.filename, exc)
+            if on_progress is not None:
+                on_progress(i, total)
     return applied
 
 
-def get_override_folders(override_zip: bytes) -> list[str]:
-    """Return sorted top-level folder names contained in the overrides zip."""
-    folders: set[str] = set()
+def get_override_entries(override_zip: bytes) -> dict[str, list[str]]:
+    """
+    Return a dict mapping top-level groups in the overrides zip to the file paths within.
+    Files at the zip root are grouped under "" (empty string). Sub-folder files are
+    grouped under their top-level folder name; values are paths relative to that group.
+    """
+    grouped: dict[str, list[str]] = {}
     try:
         with zipfile.ZipFile(io.BytesIO(override_zip)) as zf:
-            for name in zf.namelist():
-                head, sep, _ = name.partition("/")
+            for member in zf.infolist():
+                if member.is_dir():
+                    continue
+                head, sep, tail = member.filename.partition("/")
                 if sep and head:
-                    folders.add(head)
+                    grouped.setdefault(head, []).append(tail)
+                else:
+                    grouped.setdefault("", []).append(member.filename)
     except zipfile.BadZipFile:
         pass
-    return sorted(folders)
+    return grouped
 
 
 def collect_wipe_targets(install_dir: Path, folder_names: list[str]) -> list[tuple[Path, str]]:
@@ -735,6 +773,12 @@ class UpdaterApp(tk.Tk):
         self.reset_overrides: bool          = False
         self.override_zip: bytes | None     = None
         self.override_folders: list[str]    = []
+        self.override_entries: dict[str, list[str]] = {}
+        self.old_override_manifest: dict    = {}
+        self.new_override_manifest: dict    = {}
+        self.override_ops: dict             = {}
+        self.target_commit: str | None      = None
+        self.custom_mod_names: dict         = {}
         self._dvd_logo_active: bool         = False
         self._border_rainbow_active: bool   = False
         self._dance_flash_cancel            = None
@@ -930,6 +974,40 @@ class UpdaterApp(tk.Tk):
             relief="flat", bd=0, padx=18, pady=8, cursor="hand2",
             command=command,
         )
+
+    def _apply_combobox_theme(self) -> None:
+        """Configure a 'Modpack.TCombobox' style + its dropdown Listbox to match the
+        dark theme. Idempotent; safe to call from any screen that uses a Combobox."""
+        style = ttk.Style(self)
+        # 'clam' actually honours fieldbackground/background overrides on Windows;
+        # the default 'vista' theme ignores most colour configs.
+        with contextlib.suppress(tk.TclError):
+            style.theme_use("clam")
+        style.configure(
+            "Modpack.TCombobox",
+            fieldbackground=PANEL_BG,
+            background=PANEL_BG,
+            foreground=TEXT,
+            arrowcolor=TEXT,
+            bordercolor=PANEL_BG,
+            lightcolor=PANEL_BG,
+            darkcolor=PANEL_BG,
+            relief="flat",
+            padding=4,
+        )
+        style.map(
+            "Modpack.TCombobox",
+            fieldbackground=[("readonly", PANEL_BG), ("disabled", PANEL_BG)],
+            background=[("readonly", PANEL_BG), ("active", ACCENT2)],
+            foreground=[("readonly", TEXT), ("disabled", TEXT_DIM)],
+            arrowcolor=[("active", ACCENT)],
+        )
+        # The dropdown popup is a separate Listbox; configure it via the option DB.
+        self.option_add("*TCombobox*Listbox.background", PANEL_BG)
+        self.option_add("*TCombobox*Listbox.foreground", TEXT)
+        self.option_add("*TCombobox*Listbox.selectBackground", ACCENT2)
+        self.option_add("*TCombobox*Listbox.selectForeground", TEXT)
+        self.option_add("*TCombobox*Listbox.font", FONT_BODY)
 
     # ---- screen: settings ----
 
@@ -1218,13 +1296,11 @@ class UpdaterApp(tk.Tk):
                 str(entry["version"])
                 for entry in versions_data.get("versions", [])
             ]
+            # Display names for custom override mods the CurseForge API can't resolve.
+            self.custom_mod_names = versions_data.get("custom_mod_names", {})
 
-            # Fetch overrides eagerly so we know which folders will be touched.
-            try:
-                self.override_zip = fetch_overrides_zip()
-            except Exception:
-                self.override_zip = None
-            self.override_folders = get_override_folders(self.override_zip) if self.override_zip else []
+            # Override content is per-commit, so it is fetched in _run_fetch_snapshots
+            # once the target (and previous) commits are known.
 
             if not self.latest_version:
                 self.after(0, lambda: self._show_outcome(
@@ -1298,9 +1374,11 @@ class UpdaterApp(tk.Tk):
             default_version = self.target_version or self.latest_version or (
                 self.versions_list[0] if self.versions_list else ""
             )
+            # versions.json lists oldest → newest; reverse so the picker shows newest first.
+            ordered_versions = list(reversed(self.versions_list))
             options = [
                 f"{version_str} (latest)" if version_str == self.latest_version else version_str
-                for version_str in self.versions_list
+                for version_str in ordered_versions
             ]
             selected_label = (
                 f"{default_version} (latest)"
@@ -1325,17 +1403,20 @@ class UpdaterApp(tk.Tk):
             version_var.trace_add("write", on_version_change)
 
             if options:
-                menu = tk.OptionMenu(version_row, version_var, *options)
-                menu.config(
-                    font=FONT_BODY, bg=PANEL_BG, fg=TEXT,
-                    activebackground=ACCENT2, activeforeground=TEXT,
-                    relief="flat", bd=0, highlightthickness=0,
+                # ttk.Combobox gives us a scrollable popup when there are many versions;
+                # tk.OptionMenu just kept growing until it ran off the screen.
+                self._apply_combobox_theme()
+                combo = ttk.Combobox(
+                    version_row,
+                    textvariable=version_var,
+                    values=options,
+                    state="readonly",
+                    font=FONT_BODY,
+                    style="Modpack.TCombobox",
+                    height=min(len(options), 12),
+                    width=max(len(o) for o in options) + 2,
                 )
-                menu["menu"].config(
-                    font=FONT_BODY, bg=PANEL_BG, fg=TEXT,
-                    activebackground=ACCENT2, activeforeground=TEXT,
-                )
-                menu.pack(side="left")
+                combo.pack(side="left")
             else:
                 tk.Label(
                     version_row, text="No versions available",
@@ -1387,7 +1468,7 @@ class UpdaterApp(tk.Tk):
                     fg=TEXT_DIM if malformed else TEXT,
                     wraplength=560, justify="left", anchor="nw",
                 )
-                fresh_lbl.pack(side="left", fill="x", expand=True, anchor="nw")
+                fresh_lbl.pack(side="left", fill="x", expand=True, anchor="nw", padx=(8, 0))
                 if not malformed:
                     fresh_lbl.config(cursor="hand2")
                     fresh_lbl.bind("<Button-1>", lambda _: fresh_var.set(not fresh_var.get()))
@@ -1458,6 +1539,7 @@ class UpdaterApp(tk.Tk):
                     message=f"Could not find snapshot for v{self.target_version}.",
                 ))
                 return
+            self.target_commit = target_commit
 
             server_only_ids: set[str] = set(
                 str(pid) for pid in self.versions_data.get("server_only_ids", [])
@@ -1467,10 +1549,111 @@ class UpdaterApp(tk.Tk):
             self.update_plan  = build_update_plan(
                 self.old_snapshot, self.new_snapshot, self.modpack_dir,
             )
+
+            # Override files are version-controlled: fetch the target commit's content
+            # plus both commits' manifests so changes are computed against the actual
+            # versions rather than against whatever happens to be on disk. Server-only
+            # custom override mods are dropped so they never land in the client install.
+            server_only_overrides = set(self.versions_data.get("server_only_overrides", []))
+
+            def _filter_overrides(manifest: dict) -> dict:
+                if not server_only_overrides:
+                    return manifest
+                return {p: h for p, h in manifest.items() if p not in server_only_overrides}
+
+            self.new_override_manifest = _filter_overrides(fetch_override_manifest(target_commit))
+            self.old_override_manifest = _filter_overrides(fetch_override_manifest(old_commit)) if old_commit else {}
+            try:
+                self.override_zip = fetch_overrides_zip(target_commit)
+            except Exception:
+                self.override_zip = None
+            self.override_entries = get_override_entries(self.override_zip) if self.override_zip else {}
+            self.override_folders = sorted(folder for folder in self.override_entries if folder)
+
             self.after(0, self._show_changelog)
         except Exception as exc:
             error_message = f"Error fetching version data:\n\n{exc}"
             self.after(0, lambda: self._show_outcome(success=False, message=error_message))
+
+    def _compute_override_ops(self, reset_overrides: bool) -> dict:
+        """
+        Plan version-accurate override operations by diffing the previous and target
+        commits' override manifests (path -> sha256). Returns a dict with:
+          - 'added' / 'removed' / 'updated': {folder: [filename, ...]} for the changelog
+            ("" folder key holds zip-root files), grouped like get_override_entries.
+          - 'write':  list of zip member paths to extract (overwriting) in phase 4.
+          - 'delete': list of install-relative paths to delete in phase 4.
+
+        Policy:
+          * Files under mods/ are custom mods and are fully synced — added, overwritten
+            when their content changes, and deleted when dropped from the pack.
+          * Other override files (configs, kubejs, etc.) default to preserve-edits: only
+            missing files are written, and nothing is overwritten or deleted unless the
+            user opts into a Reset (or a fresh install), which wipes and re-extracts.
+          * Folders wiped by phase 2 (CATEGORY_DIRS on a fresh install, override folders
+            on a reset) are re-extracted here; their deletions are handled by the wipe.
+        """
+        added: dict[str, list[str]]   = {}
+        removed: dict[str, list[str]] = {}
+        updated: dict[str, list[str]] = {}
+        write: list[str]              = []
+        delete: list[str]             = []
+        ops = {"added": added, "removed": removed, "updated": updated,
+               "write": write, "delete": delete}
+        if not self.modpack_dir:
+            return ops
+
+        old = self.old_override_manifest
+        new = self.new_override_manifest
+
+        # Top-level folders that phase 2 wipes before phase 4 re-extracts.
+        wiped: set[str] = set()
+        if self.fresh_install:
+            wiped.update(CATEGORY_DIRS)
+        if reset_overrides:
+            wiped.update(self.override_folders)
+
+        for path in set(old) | set(new):
+            top      = path.split("/", 1)[0] if "/" in path else ""
+            folder   = top
+            filename = path[len(top) + 1:] if top else path
+            is_mod   = top == "mods"
+            in_old   = path in old
+            in_new   = path in new
+            changed  = in_old and in_new and old[path] != new[path]
+            exists_locally = (self.modpack_dir / path).exists()
+            folder_wiped   = top in wiped
+
+            if in_new:
+                if is_mod:
+                    if not in_old:
+                        write.append(path)
+                        added.setdefault(folder, []).append(filename)
+                    elif changed:
+                        write.append(path)
+                        updated.setdefault(folder, []).append(filename)
+                    elif folder_wiped:
+                        write.append(path)          # unchanged, but wiped — restore it
+                        if self.fresh_install:
+                            added.setdefault(folder, []).append(filename)
+                else:
+                    if folder_wiped or not exists_locally:
+                        write.append(path)
+                        if not in_old:
+                            added.setdefault(folder, []).append(filename)
+                        elif changed:
+                            updated.setdefault(folder, []).append(filename)
+                        elif self.fresh_install:
+                            added.setdefault(folder, []).append(filename)
+                    # else: preserve the player's existing copy (no write)
+            else:
+                # Dropped from the pack. Wiped folders are cleared by phase 2; otherwise
+                # only custom mods are auto-removed (configs are left for the player).
+                if is_mod and not folder_wiped and exists_locally:
+                    delete.append(path)
+                    removed.setdefault(folder, []).append(filename)
+
+        return ops
 
     # ---- screen: changelog ----
 
@@ -1534,9 +1717,37 @@ class UpdaterApp(tk.Tk):
                 added_names   = sorted([name for _, _, name, is_upd in _plan["download"] if not is_upd], key=str.lower)
                 updated_names = sorted([name for _, _, name, is_upd in _plan["download"] if is_upd], key=str.lower)
                 _updated_set  = set(updated_names)
-                removed_entries = [(p, name) for p, name in _plan["delete"] if name not in _updated_set]
-                num_added   = len(added_names)
-                num_updated = len(updated_names)
+
+                ops = self._compute_override_ops(reset_var.get())
+                self.override_ops = ops
+                override_added         = ops["added"]
+                override_removed       = ops["removed"]
+                override_updated       = ops["updated"]
+                override_added_count   = sum(len(v) for v in override_added.values())
+                override_updated_count = sum(len(v) for v in override_updated.values())
+
+                # Wipe-targets that the override zip re-extracts shouldn't appear in
+                # Removed — they show up under Added/Updated instead (same path, new content).
+                override_write_paths: set[Path] = {self.modpack_dir / p for p in ops["write"]}
+                removed_entries = [
+                    (p, name) for p, name in _plan["delete"]
+                    if name not in _updated_set and p not in override_write_paths
+                ]
+                # Custom mods dropped between versions aren't wipe targets, so add them
+                # to the Removed list explicitly.
+                for folder, files in override_removed.items():
+                    for filename in files:
+                        rel = filename if not folder else f"{folder}/{filename}"
+                        removed_entries.append((self.modpack_dir / rel, filename))
+
+                if self.fresh_install:
+                    # Fresh install has no separate "to update" bucket — everything that
+                    # ends up on disk is folded into the to-download count.
+                    num_added   = len(added_names) + override_added_count + override_updated_count
+                    num_updated = 0
+                else:
+                    num_added   = len(added_names) + override_added_count
+                    num_updated = len(updated_names) + override_updated_count
                 num_removed = len(removed_entries)
 
                 # Stats row
@@ -1567,6 +1778,26 @@ class UpdaterApp(tk.Tk):
                         font=FONT_BODY, bg=DARK_BG, fg=colour, pady=8,
                     ).pack(side="left")
 
+                # ---- helpers used by the body renderer below ----
+                def render_grouped(grouped: dict, file_tag: str) -> None:
+                    """Emit a folder/  +  |_ file tree. Empty-string folder renders as '/'.
+                    Custom mods with a configured display name render by name."""
+                    for folder in sorted(grouped):
+                        files = sorted(grouped[folder], key=str.lower)
+                        if not files:
+                            continue
+                        header = f"{folder}/" if folder else "/"
+                        text.insert("end", f"  {header}\n", "folder")
+                        for name in files:
+                            full_path = name if not folder else f"{folder}/{name}"
+                            label = self.custom_mod_names.get(full_path, name)
+                            text.insert("end", f"    |_ {label}\n", file_tag)
+
+                def render_deletes() -> None:
+                    assert self.modpack_dir is not None
+                    grouped = group_deletes_by_folder(removed_entries, self.modpack_dir)
+                    render_grouped(grouped, "removed")
+
                 # Body
                 text.config(state="normal")
                 text.delete("1.0", "end")
@@ -1575,9 +1806,18 @@ class UpdaterApp(tk.Tk):
                     text.insert("end", "To Download\n", "section_added")
                     text.insert("end", "\n")
                     changes = diff_snapshots(self.old_snapshot, self.new_snapshot)
-                    if changes["added"]:
+                    has_any = bool(changes["added"]) or override_added_count or override_updated_count
+                    if has_any:
                         for _, entry in changes["added"]:
                             text.insert("end", f"  + {entry['name']}\n", "added")
+                        # Fresh install groups both buckets under "to download" since
+                        # there's no separate update section in this mode.
+                        merged: dict[str, list[str]] = {}
+                        for folder, files in override_added.items():
+                            merged.setdefault(folder, []).extend(files)
+                        for folder, files in override_updated.items():
+                            merged.setdefault(folder, []).extend(files)
+                        render_grouped(merged, "added")
                     else:
                         text.insert("end", "  Nothing to download.\n", "placeholder")
                     text.insert("end", "\n")
@@ -1585,23 +1825,16 @@ class UpdaterApp(tk.Tk):
                     text.insert("end", "To Delete\n", "section_removed")
                     text.insert("end", "\n")
                     if removed_entries:
-                        grouped = group_deletes_by_folder(removed_entries, self.modpack_dir)
-                        for folder in sorted(grouped):
-                            if folder:
-                                text.insert("end", f"  {folder}\n", "folder")
-                                for name in sorted(grouped[folder], key=str.lower):
-                                    text.insert("end", f"    |_ {name}\n", "removed")
-                            else:
-                                for name in sorted(grouped[folder], key=str.lower):
-                                    text.insert("end", f"  - {name}\n", "removed")
+                        render_deletes()
                     else:
                         text.insert("end", "  Nothing to delete.\n", "placeholder")
                 else:
                     text.insert("end", "Added\n", "section_added")
                     text.insert("end", "\n")
-                    if added_names:
+                    if added_names or override_added_count:
                         for name in added_names:
                             text.insert("end", f"  + {name}\n", "added")
+                        render_grouped(override_added, "added")
                     else:
                         text.insert("end", "  No files added.\n", "placeholder")
                     text.insert("end", "\n")
@@ -1609,24 +1842,17 @@ class UpdaterApp(tk.Tk):
                     text.insert("end", "Removed\n", "section_removed")
                     text.insert("end", "\n")
                     if removed_entries:
-                        grouped = group_deletes_by_folder(removed_entries, self.modpack_dir)
-                        for folder in sorted(grouped):
-                            if folder:
-                                text.insert("end", f"  {folder}\n", "folder")
-                                for name in sorted(grouped[folder], key=str.lower):
-                                    text.insert("end", f"    |_ {name}\n", "removed")
-                            else:
-                                for name in sorted(grouped[folder], key=str.lower):
-                                    text.insert("end", f"  - {name}\n", "removed")
+                        render_deletes()
                     else:
                         text.insert("end", "  No files removed.\n", "placeholder")
                     text.insert("end", "\n")
 
                     text.insert("end", "Updated\n", "section_updated")
                     text.insert("end", "\n")
-                    if updated_names:
+                    if updated_names or override_updated_count:
                         for name in updated_names:
                             text.insert("end", f"  ~ {name}\n", "updated")
+                        render_grouped(override_updated, "updated")
                     else:
                         text.insert("end", "  No files updated.\n", "placeholder")
 
@@ -1642,9 +1868,11 @@ class UpdaterApp(tk.Tk):
             # "Reset overrides" toggle
             reset_row = tk.Frame(frame, bg=DARK_BG, padx=20)
             reset_row.pack(fill="x", pady=(4, 0))
-            override_list = ", ".join(f"{name}/" for name in self.override_folders)
-            if not self.override_folders:
-                reset_text  = "Reset overrides  (no override folders in this modpack)"
+            override_parts: list[str] = [f"{name}/" for name in self.override_folders]
+            override_parts.extend(sorted(self.override_entries.get("", []), key=str.lower))
+            override_list = ", ".join(override_parts)
+            if not override_parts:
+                reset_text  = "Reset overrides  (no override files in this modpack)"
                 reset_state = "disabled"
             else:
                 reset_text  = (
@@ -1669,7 +1897,7 @@ class UpdaterApp(tk.Tk):
                 font=FONT_BODY, bg=DARK_BG, fg=TEXT_DIM,
                 wraplength=560, justify="left", anchor="nw",
             )
-            reset_lbl.pack(side="left", fill="x", expand=True, anchor="nw")
+            reset_lbl.pack(side="left", fill="x", expand=True, anchor="nw", padx=(8, 0))
             if reset_state == "normal":
                 reset_lbl.config(cursor="hand2")
                 def _on_reset_cb_command() -> None:
@@ -1684,15 +1912,18 @@ class UpdaterApp(tk.Tk):
 
             button_row = tk.Frame(frame, bg=DARK_BG)
             button_row.pack(fill="x", padx=20, pady=12)
-            self._register_konami_button_row(button_row)
-            self._secondary_button(button_row, "Cancel", self._on_close).pack(side="right", padx=(10, 0))
+            # Pack Back before registering the konami row so it lands left of the
+            # Dance? button (which _register_... packs side="left").
             self._secondary_button(
                 button_row, "←  Back", self._show_version_options,
-            ).pack(side="right", padx=(10, 0))
+            ).pack(side="left")
+            self._register_konami_button_row(button_row)
+            self._secondary_button(button_row, "Cancel", self._on_close).pack(side="right", padx=(10, 0))
             confirm_label = "Confirm & Reset  →" if self.fresh_install else "Confirm & Update  →"
 
             def _confirm() -> None:
                 self.reset_overrides = reset_var.get()
+                self.override_ops    = self._compute_override_ops(self.reset_overrides)
                 self._show_updating()
 
             self._primary_button(button_row, confirm_label, _confirm).pack(side="right")
@@ -1736,7 +1967,6 @@ class UpdaterApp(tk.Tk):
             log_text.tag_config("log_download", foreground=TEXT,    font=FONT_MONO)
             log_text.tag_config("log_warn",     foreground=YELLOW,  font=FONT_MONO)
             log_text.tag_config("log_error",    foreground=RED,     font=FONT_MONO)
-            log_text.tag_config("log_version",  foreground=ACCENT,  font=FONT_MONO)
             self._log_text = log_text
 
             button_row = tk.Frame(frame, bg=DARK_BG)
@@ -1846,42 +2076,81 @@ class UpdaterApp(tk.Tk):
                 except OSError as exc:
                     self._log(f"  [warn] could not install {tmp_path.name}: {exc}", "log_warn")
 
-            # Phase 4: apply overrides
-            # self.reset_overrides=True extracts everything; False adds only missing files.
-            self._set_progress("Applying overrides…")
-            # Re-fetch only if we didn't already cache the bytes during _run_check.
-            override_zip = self.override_zip
-            if override_zip is None:
-                try:
-                    override_zip = fetch_overrides_zip()
-                except Exception:
-                    override_zip = None
-            if override_zip:
-                applied = apply_overrides_zip(
-                    self.modpack_dir, override_zip,
-                    new_files_only=not self.reset_overrides,
-                )
-                for rel_path in applied:
-                    self._log(f"  + {rel_path}", "log_add")
+            # Phase 4: apply version-controlled overrides as planned in _compute_override_ops.
+            # ops['delete'] removes custom mods dropped between versions; ops['write']
+            # extracts the added/updated files (mods always; configs only when missing,
+            # or everything on a reset / fresh install).
+            ops              = self.override_ops or {}
+            override_deletes = ops.get("delete", [])
+            override_writes  = ops.get("write", [])
+
+            if override_deletes:
+                self._set_progress("Removing overrides…")
+                for rel in override_deletes:
+                    try:
+                        (self.modpack_dir / rel).unlink(missing_ok=True)
+                        self._log(f"  - {rel}", "log_remove")
+                    except OSError as exc:
+                        self._log(f"  [warn] could not delete {rel}: {exc}", "log_warn")
+
+            if override_writes:
+                self._set_progress("Applying overrides…")
+                # Re-fetch only if we didn't already cache the bytes during fetch-snapshots.
+                override_zip = self.override_zip
+                if override_zip is None and self.target_commit:
+                    try:
+                        override_zip = fetch_overrides_zip(self.target_commit)
+                    except Exception:
+                        override_zip = None
+                if override_zip:
+                    # Rate-limit progress updates so we don't flood the Tk event queue
+                    # with thousands of after() callbacks for a large overrides zip.
+                    last_progress = [0.0]
+                    def on_override_progress(current: int, total: int) -> None:
+                        now = time.monotonic()
+                        if current == total or now - last_progress[0] >= 0.1:
+                            last_progress[0] = now
+                            self._set_progress(f"Applying overrides…  {current} / {total}")
+                    def on_override_error(filename: str, exc: OSError) -> None:
+                        self._log(f"  [warn] could not write {filename}: {exc}", "log_warn")
+                    applied = extract_override_members(
+                        self.modpack_dir, override_zip, override_writes,
+                        on_progress=on_override_progress,
+                        on_error=on_override_error,
+                    )
+                    if applied:
+                        verb = "Re-extracted" if self.reset_overrides else "Applied"
+                        self._log(f"  + {verb} {len(applied)} override file(s)", "log_add")
+                else:
+                    self._log("  [warn] override content unavailable — skipped.", "log_warn")
 
             # Phase 5: record the installed version last — a crash during
             # phases 1-4 leaves bcc-common.toml at the previous version.
             write_installed_version(self.modpack_dir, self.target_version)
-            self._log("")
-            self._log(f"bcc-common.toml → {_bcc_version(self.target_version)}", "log_version")
 
             self.after(0, lambda: self._show_outcome(
                 success=True,
                 message=f"Updated to v{self.target_version}. Launch Minecraft to play.",
             ))
         except Exception as exc:
-            self.after(0, lambda: self._show_outcome(
-                success=False, message=f"Update failed:\n\n{exc}",
-            ))
+            error_message = f"Update failed:\n\n{type(exc).__name__}: {exc}"
+            self.after(0, lambda: self._show_outcome(success=False, message=error_message))
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
     # ---- screen: outcome (success or error) ----
+
+    def _pack_version_pill(self, parent: tk.Frame) -> None:
+        """Pack a centered green bcc-common version label into parent.
+        Packed with expand=True so it fills the space between any side-packed
+        buttons (Dance on the left, Finish/Close on the right)."""
+        if self.target_version is None:
+            return
+        tk.Label(
+            parent,
+            text=f"bcc-common.toml → {_bcc_version(self.target_version)}",
+            font=FONT_MONO, bg=DARK_BG, fg=GREEN, anchor="center",
+        ).pack(side="left", fill="x", expand=True)
 
     def _show_outcome(self, success: bool, message: str) -> None:
         colour = ACCENT if success else RED
@@ -1897,6 +2166,7 @@ class UpdaterApp(tk.Tk):
                 self._primary_button(button_row, "Finish", self._on_close).pack(side="right")
                 if success:
                     self._register_konami_button_row(button_row)
+                    self._pack_version_pill(button_row)
                 if self._log_text is not None:
                     self.update_idletasks()
                     self._log_text.see("end")
@@ -1926,6 +2196,8 @@ class UpdaterApp(tk.Tk):
                 btn_row.pack(fill="x", padx=20, pady=12)
                 self._register_konami_button_row(btn_row)
                 self._primary_button(btn_row, "Close", self._on_close).pack(side="right")
+                if _success:
+                    self._pack_version_pill(btn_row)
                 return frame
             self._current_builder = _outcome_builder
         else:

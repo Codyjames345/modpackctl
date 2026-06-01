@@ -50,6 +50,21 @@ server_only = []
 # List project IDs to exclude from server releases (client-side only mods)
 client_only = []
 
+# Optional: custom mods / override files that aren't on CurseForge (e.g. a jar you
+# modified yourself and dropped in overrides/mods/). They're version-controlled like
+# any other override, but since the CurseForge API can't resolve them you can give each
+# one a display name (shown in changelogs and the updater) and an optional side so it's
+# excluded from the other side's release. `file` is the path under overrides/.
+# [[settings.custom_mods]]
+# file = "mods/MyCustomMod.jar"
+# name = "My Custom Mod"
+# side = "server"            # "client", "server", or omit for both
+#
+# [[settings.custom_mods]]
+# file = "mods/ClientTweaks.jar"
+# name = "Client Tweaks"
+# side = "client"
+
 # Optional: theme colour overrides for the updater. Any key listed below can be
 # omitted to keep the default. Unknown keys or non-#rrggbb values cause modpackctl
 # to abort the bake.

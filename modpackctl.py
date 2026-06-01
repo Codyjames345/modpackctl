@@ -42,7 +42,7 @@ SNAPSHOTS       = REPO / "snapshots"
 LOG_FILE        = REPO / "log.json"
 CACHE           = REPO / "mod_cache.json"    # project_id -> { name, files: { file_id: filename } }
 DL_CACHE        = REPO / "dl_cache"          # permanent jar store keyed by (project_id, file_id)
-OVERRIDES_STORE = REPO / "overrides"
+OVERRIDES_BLOBS = REPO / "overrides_blobs"   # content-addressed store: sha256 hex -> file bytes
 CONFIG_FILE     = Path("modpackctl.toml")
 GITIGNORE       = Path(".gitignore")
 
@@ -256,6 +256,41 @@ def get_filter_list(key: str) -> set[str]:
         return set()
 
 
+def get_custom_mods() -> dict[str, dict]:
+    """
+    Return metadata for custom override mods declared in [[settings.custom_mods]].
+
+    These are files in the overrides/ tree (typically jars under mods/ that aren't on
+    CurseForge) that need a human-readable name and/or a client/server-only side, since
+    the CurseForge API can't resolve them. Returns {override_path: {"name", "side"}},
+    where override_path is the posix path under overrides/ (e.g. 'mods/MyMod.jar') and
+    side is "client", "server", or "" (both).
+    """
+    cfg     = load_config()
+    entries = cfg.get("settings", {}).get("custom_mods", [])
+    result: dict[str, dict] = {}
+    for entry in entries:
+        if not isinstance(entry, dict) or not entry.get("file"):
+            continue
+        path = Path(str(entry["file"])).as_posix()
+        side = str(entry.get("side", "")).strip().lower()
+        result[path] = {
+            "name": str(entry.get("name", "")).strip(),
+            "side": side if side in ("client", "server") else "",
+        }
+    return result
+
+
+def get_custom_mod_names() -> dict[str, str]:
+    """Return {override_path: display_name} for custom mods that declare a name."""
+    return {path: meta["name"] for path, meta in get_custom_mods().items() if meta["name"]}
+
+
+def get_side_only_overrides(side: str) -> set[str]:
+    """Return the override paths declared for the given side only ('client' or 'server')."""
+    return {path for path, meta in get_custom_mods().items() if meta["side"] == side}
+
+
 # -------------------------
 # HELPERS
 # -------------------------
@@ -367,56 +402,93 @@ def _modloader_display(modloader_id: str) -> str:
     return modloader_id
 
 
-def store_overrides(zip_path: Path | str) -> int:
+def _override_member_allowed(relative_path: str) -> bool:
     """
-    Extract the overrides/ tree from a CurseForge zip into OVERRIDES_STORE,
-    replacing any previously stored overrides. Returns the number of files stored.
+    Return True if an overrides/ member should be version-controlled.
 
-    Inside shaderpacks/, only direct .zip files are stored — extracted shaderpack
-    folders (which Euphoria Patcher creates when a player uses them) and other non-zip
-    files are skipped so they don't bloat the overrides bundle.
+    Inside shaderpacks/, only direct .zip files are kept — extracted shaderpack
+    folders (which Euphoria Patcher creates when a player uses them) and other
+    non-zip files are skipped so they don't bloat the overrides bundle.
+    """
+    if not relative_path:
+        return False
+    if relative_path.startswith("shaderpacks/"):
+        sub_path = relative_path[len("shaderpacks/"):].rstrip("/")
+        if not sub_path or "/" in sub_path or not sub_path.lower().endswith(".zip"):
+            return False
+    return True
+
+
+def _store_override_blob(data: bytes) -> str:
+    """Write data into the content-addressed override blob store and return its sha256 hex."""
+    digest    = hashlib.sha256(data).hexdigest()
+    OVERRIDES_BLOBS.mkdir(parents=True, exist_ok=True)
+    blob_path = OVERRIDES_BLOBS / digest
+    if not blob_path.exists():
+        blob_path.write_bytes(data)
+    return digest
+
+
+def extract_override_manifest(zip_path: Path | str) -> dict[str, str]:
+    """
+    Extract the overrides/ tree from a CurseForge zip into the content-addressed
+    blob store and return a manifest mapping each override's posix relative path
+    to its sha256 hex. Used so override files are version-controlled per commit
+    exactly like CurseForge mods are.
     """
     zip_path = Path(zip_path)
+    manifest: dict[str, str] = {}
     if not zip_path.is_file() or zip_path.suffix != ".zip":
-        return 0
+        return manifest
 
-    if OVERRIDES_STORE.exists():
-        shutil.rmtree(OVERRIDES_STORE)
-    OVERRIDES_STORE.mkdir(parents=True, exist_ok=True)
-
-    file_count = 0
+    prefix = "overrides/"
     with zipfile.ZipFile(zip_path, "r") as zf:
-        prefix = "overrides/"
         for member_name in zf.namelist():
-            if not member_name.startswith(prefix):
+            if not member_name.startswith(prefix) or member_name.endswith("/"):
                 continue
             relative_path = member_name[len(prefix):]
-            if not relative_path:
+            if not _override_member_allowed(relative_path):
                 continue
-            if relative_path.startswith("shaderpacks/"):
-                sub_path = relative_path[len("shaderpacks/"):].rstrip("/")
-                if not sub_path or "/" in sub_path or not sub_path.lower().endswith(".zip"):
-                    continue
-            out_path = OVERRIDES_STORE / relative_path
-            if member_name.endswith("/"):
-                out_path.mkdir(parents=True, exist_ok=True)
-            else:
-                out_path.parent.mkdir(parents=True, exist_ok=True)
-                with zf.open(member_name) as src, open(out_path, "wb") as dst:
-                    shutil.copyfileobj(src, dst)
-                file_count += 1
-    return file_count
+            with zf.open(member_name) as src:
+                data = src.read()
+            manifest[Path(relative_path).as_posix()] = _store_override_blob(data)
+    return manifest
 
 
-def apply_overrides(dest: Path) -> bool:
+def save_override_manifest(commit_id: str, manifest: dict[str, str]) -> None:
+    """Persist the override path->hash manifest for a commit alongside its mod snapshot."""
+    save_json(SNAPSHOTS / f"{commit_id}.overrides.json", manifest)
+
+
+def load_override_manifest(commit_id: str) -> dict[str, str]:
+    """Return the override path->hash manifest for a commit, or {} if it has none."""
+    return load_json(SNAPSHOTS / f"{commit_id}.overrides.json", {})
+
+
+def apply_overrides(dest: Path, commit_id: str, exclude_paths: set[str] | None = None) -> bool:
     """
-    Copy the stored overrides tree into dest (the release build directory).
-    Returns True if any files were copied, False if no overrides are stored.
+    Reconstruct a commit's exact override tree from the blob store into dest
+    (the release build directory). Override paths in exclude_paths are skipped
+    (used to drop client-only / server-only custom mods from a side's build).
+    Returns True if any files were written.
     """
-    if not OVERRIDES_STORE.exists() or not any(OVERRIDES_STORE.rglob("*")):
+    exclude_paths = exclude_paths or set()
+    manifest = load_override_manifest(commit_id)
+    if not manifest:
         return False
-    shutil.copytree(OVERRIDES_STORE, dest, dirs_exist_ok=True)
-    return True
+    wrote_any = False
+    for relative_path, digest in manifest.items():
+        if relative_path in exclude_paths:
+            continue
+        blob_path = OVERRIDES_BLOBS / digest
+        if not blob_path.exists():
+            print(f"  [WARN] Missing override blob for {relative_path} ({digest[:10]}) — skipping.")
+            continue
+        out_path = dest / relative_path
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(blob_path, out_path)
+        wrote_any = True
+    return wrote_any
 
 
 # -------------------------
@@ -671,6 +743,22 @@ def diff(old: dict, new: dict) -> dict:
     return {"added": added, "removed": removed, "updated": updated}
 
 
+def diff_overrides(old: dict[str, str], new: dict[str, str]) -> dict:
+    """
+    Compute the difference between two override manifests (path -> sha256 hex).
+    Returns a dict with keys 'added' (set of paths), 'removed' (set of paths), and
+    'updated' (list of (path, old_hash, new_hash) for paths whose content changed).
+    """
+    added   = new.keys() - old.keys()
+    removed = old.keys() - new.keys()
+    updated = [
+        (path, old[path], new[path])
+        for path in old.keys() & new.keys()
+        if old[path] != new[path]
+    ]
+    return {"added": added, "removed": removed, "updated": updated}
+
+
 # -------------------------
 # VERSIONING
 # -------------------------
@@ -866,7 +954,7 @@ def init(source: str, force: bool = False) -> None:
 
     if REPO.exists() and force:
         print("[WARNING] --force: resetting repository (download cache is preserved).")
-        for directory in (OVERRIDES_STORE, SNAPSHOTS):
+        for directory in (OVERRIDES_BLOBS, SNAPSHOTS):
             if directory.exists():
                 shutil.rmtree(directory, ignore_errors=True)
         LOG_FILE.unlink(missing_ok=True)
@@ -904,7 +992,18 @@ def commit(source: str, major: bool = False, message: str = "") -> tuple[str, st
         str(mod["projectID"]): str(mod["fileID"])
         for mod in manifest.get("files", [])
     }
-    commit_id = hash_state(bare_mods)
+
+    # Override files are version-controlled alongside the mods: their content is
+    # folded into the commit id so editing a custom jar or config produces a new
+    # version, exactly as changing a CurseForge file id would.
+    override_manifest = extract_override_manifest(source)
+    if override_manifest:
+        commit_id = hashlib.sha1(
+            json.dumps({"mods": bare_mods, "overrides": override_manifest}, sort_keys=True).encode()
+        ).hexdigest()[:10]
+    else:
+        # Preserve the legacy hash for mod-only packs so existing repos stay stable.
+        commit_id = hash_state(bare_mods)
 
     log = load_log()
 
@@ -913,11 +1012,21 @@ def commit(source: str, major: bool = False, message: str = "") -> tuple[str, st
             print(f"[INFO] This zip matches an already-committed version ({existing_entry['version']}) — nothing to commit.")
             return None
 
-    old_snapshot  = load_snapshot(log[-1]["commit"]) if log else {}
-    old_version   = log[-1]["version"] if log else ""
-    old_modloader = log[-1].get("modloader", "") if log else ""
+    old_commit            = log[-1]["commit"] if log else ""
+    old_snapshot          = load_snapshot(old_commit) if old_commit else {}
+    old_override_manifest = load_override_manifest(old_commit) if old_commit else {}
+    old_version           = log[-1]["version"] if log else ""
+    old_modloader         = log[-1].get("modloader", "") if log else ""
 
-    changes = diff(old_snapshot, bare_mods)
+    changes          = diff(old_snapshot, bare_mods)
+    override_changes = diff_overrides(old_override_manifest, override_manifest)
+
+    # Version bumps consider mods and overrides together.
+    combined_changes = {
+        "added":   bool(changes["added"]   or override_changes["added"]),
+        "removed": bool(changes["removed"] or override_changes["removed"]),
+        "updated": bool(changes["updated"] or override_changes["updated"]),
+    }
 
     # Only trigger auto-major if both old and new modloader strings are known;
     # avoids a false positive when the manifest lacks a modLoaders entry.
@@ -930,16 +1039,17 @@ def commit(source: str, major: bool = False, message: str = "") -> tuple[str, st
     elif major or modloader_changed:
         version = bump_major(old_version)
     else:
-        version = bump(old_version, changes)
+        version = bump(old_version, combined_changes)
 
     _prefetch_names({str(mod["projectID"]) for mod in manifest.get("files", [])})
     snapshot = build_snapshot(manifest, load_json(CACHE, {}))
     save_snapshot(commit_id, snapshot)
+    save_override_manifest(commit_id, override_manifest)
     add_version(
         commit_id, version,
-        added=len(changes["added"]),
-        removed=len(changes["removed"]),
-        updated=len(changes["updated"]),
+        added=len(changes["added"])   + len(override_changes["added"]),
+        removed=len(changes["removed"]) + len(override_changes["removed"]),
+        updated=len(changes["updated"]) + len(override_changes["updated"]),
         modloader=new_modloader,
         minecraft_version=minecraft_version,
         message=message,
@@ -958,12 +1068,16 @@ def commit(source: str, major: bool = False, message: str = "") -> tuple[str, st
         print(f"  [-] {len(changes['removed'])} mod(s) removed")
     if changes["updated"]:
         print(f"  [~] {len(changes['updated'])} mod(s) updated")
-    if not changes["added"] and not changes["removed"] and not changes["updated"] and not modloader_changed:
-        print("  (no mod changes)")
+    if override_changes["added"]:
+        print(f"  [+] {len(override_changes['added'])} override file(s) added")
+    if override_changes["removed"]:
+        print(f"  [-] {len(override_changes['removed'])} override file(s) removed")
+    if override_changes["updated"]:
+        print(f"  [~] {len(override_changes['updated'])} override file(s) updated")
+    if not any(combined_changes.values()) and not modloader_changed:
+        print("  (no changes)")
 
-    override_count = store_overrides(source)
-    if override_count:
-        print(f"  {override_count} override file(s) stored.")
+    print(f"  {len(override_manifest)} override file(s) tracked.")
 
     return version, commit_id, len(snapshot)
 
@@ -980,6 +1094,7 @@ def changelog(
     message: str = "",
     exclude: set[str] | None = None,
     exclude_categories: set[str] | None = None,
+    exclude_overrides: set[str] | None = None,
 ) -> None:
     """
     Generate a Markdown changelog between two committed versions and write it to a file.
@@ -987,8 +1102,12 @@ def changelog(
     Includes a Modloader section when the modloader id changed between the two versions.
     An optional message is inserted as a short paragraph below the heading.
     exclude filters out specific project IDs; exclude_categories filters by mod category
-    (e.g. 'shaderpacks', 'resourcepacks') using the stored mod index.
+    (e.g. 'shaderpacks', 'resourcepacks') using the stored mod index; exclude_overrides
+    filters out specific override paths (client-only / server-only custom mods).
+    Custom override mods are shown by their configured display name where available.
     """
+    excluded_override_paths = exclude_overrides or set()
+    custom_mod_names        = get_custom_mod_names()
 
     new_commit_id = get_commit(v2)
     if not new_commit_id:
@@ -1031,10 +1150,34 @@ def changelog(
         old_entry     = get_log_entry(v1)
         old_modloader = old_entry.get("modloader", "") if old_entry else ""
 
+    # Override files are version-controlled too: diff their per-commit manifests.
+    # exclude (project IDs) doesn't apply to overrides, but exclude_categories does for
+    # files under a shaderpacks/ or resourcepacks/ top folder, and exclude_overrides
+    # drops client-only / server-only custom mods by path.
+    def apply_override_filter(manifest: dict) -> dict:
+        if not exclude_categories and not excluded_override_paths:
+            return manifest
+        return {
+            path: digest
+            for path, digest in manifest.items()
+            if path not in excluded_override_paths
+            and (not exclude_categories or path.split("/", 1)[0] not in exclude_categories)
+        }
+
+    new_override_manifest = apply_override_filter(load_override_manifest(new_commit_id))
+    if v1 is None:
+        old_override_manifest: dict = {}
+    else:
+        old_override_manifest = apply_override_filter(load_override_manifest(get_commit(v1)))
+    override_changes = diff_overrides(old_override_manifest, new_override_manifest)
+
     modloader_changed = bool(
         old_modloader and new_modloader and old_modloader != new_modloader
     )
-    has_changes = changes["added"] or changes["removed"] or changes["updated"] or modloader_changed
+    has_changes = (
+        changes["added"] or changes["removed"] or changes["updated"] or modloader_changed
+        or override_changes["added"] or override_changes["removed"] or override_changes["updated"]
+    )
 
     _prefetch_names(
         project_ids={str(project_id) for project_id in changes["added"] | changes["removed"]}
@@ -1063,38 +1206,56 @@ def changelog(
         lines.append(f"- {new_modloader}")
         lines.append("")
 
+    def append_override_lines(paths: list[str], marker: str) -> None:
+        """
+        Append override entries below the mods in a section. Custom mods with a
+        configured display name render by name (the CF API can't resolve them);
+        all other override files render as their `path` in code.
+        """
+        for index, path in enumerate(sorted(paths), 1):
+            display = custom_mod_names.get(path)
+            print(f"  [{marker}] {display or path} (override) ({index}/{len(paths)})")
+            lines.append(f"- {display}" if display else f"- `{path}`")
+
+    override_added   = list(override_changes["added"])
+    override_removed = list(override_changes["removed"])
+    override_updated = [path for path, _, _ in override_changes["updated"]]
+
     # --- Added ---
     lines.append("## ➕ Added")
-    if changes["added"]:
+    if changes["added"] or override_added:
         added_list = sorted(changes["added"])
         for index, project_id in enumerate(added_list, 1):
             mod_name = resolve_mod(project_id)
             print(f"  [+] {mod_name} ({index}/{len(added_list)})")
             lines.append(f"- {mod_name}")
+        append_override_lines(override_added, "+")
     else:
         lines.append("_No mods added._")
     lines.append("")
 
     # --- Removed ---
     lines.append("## ➖ Removed")
-    if changes["removed"]:
+    if changes["removed"] or override_removed:
         removed_list = sorted(changes["removed"])
         for index, project_id in enumerate(removed_list, 1):
             mod_name = resolve_mod(project_id)
             print(f"  [-] {mod_name} ({index}/{len(removed_list)})")
             lines.append(f"- {mod_name}")
+        append_override_lines(override_removed, "-")
     else:
         lines.append("_No mods removed._")
     lines.append("")
 
     # --- Updated ---
     lines.append("## 🔄 Updated")
-    if changes["updated"]:
+    if changes["updated"] or override_updated:
         updated_list = sorted(changes["updated"])
         for index, (project_id, *_) in enumerate(updated_list, 1):
             mod_name = resolve_mod(project_id)
             print(f"  [~] {mod_name} ({index}/{len(updated_list)})")
             lines.append(f"- {mod_name}")
+        append_override_lines(override_updated, "~")
     else:
         lines.append("_No mods updated._")
 
@@ -1238,13 +1399,15 @@ def release(
     exclude: set[str] | None = None,
     exclude_categories: set[str] | None = None,
     suffix: str = "",
+    exclude_overrides: set[str] | None = None,
 ) -> Path | None:
     """
     Build a distributable release zip for the given version.
 
     Calls update() to produce a clean build directory, applies any stored
     overrides on top, then zips the result into releases/. Overrides are applied
-    after update() because update() clears BUILD first.
+    after update() because update() clears BUILD first. exclude_overrides drops
+    specific override paths (client-only / server-only custom mods) from this build.
 
     Returns the Path to the created zip, or None if the build failed.
     """
@@ -1259,7 +1422,7 @@ def release(
         print("[ERROR] Release aborted: not all mods could be fetched.")
         return None
 
-    overrides_included = apply_overrides(BUILD)
+    overrides_included = apply_overrides(BUILD, commit_id, exclude_paths=exclude_overrides)
     if overrides_included:
         print("Overrides applied from repo.")
     else:
@@ -1303,14 +1466,17 @@ def release(
 
 
 def release_client(version: str) -> Path | None:
-    """Build a client release zip, bake and compile the client updater, and export a CurseForge zip, excluding server_only mods."""
+    """Build a client release zip, bake and compile the client updater, and export a CurseForge zip, excluding server_only mods and server-only custom override mods."""
     print(f"Building client release for v{version}...")
     excluded = get_filter_list("server_only")
     if not excluded:
         print("[WARN] No server_only list found in config — building full release.")
     else:
         print(f"[INFO] Excluding {len(excluded)} server-only mod(s).")
-    zip_path = release(version, exclude=excluded, suffix="client")
+    excluded_overrides = get_side_only_overrides("server")
+    if excluded_overrides:
+        print(f"[INFO] Excluding {len(excluded_overrides)} server-only custom override mod(s).")
+    zip_path = release(version, exclude=excluded, suffix="client", exclude_overrides=excluded_overrides)
     if zip_path:
         if bake_client_updater():
             _build_exe(_baked_client_updater_path())
@@ -1319,13 +1485,16 @@ def release_client(version: str) -> Path | None:
 
 
 def release_server(version: str) -> Path | None:
-    """Build a server release zip and bake the server updater, excluding client_only mods, shaderpacks, and resourcepacks."""
+    """Build a server release zip and bake the server updater, excluding client_only mods, client-only custom override mods, shaderpacks, and resourcepacks."""
     excluded = get_filter_list("client_only")
     if not excluded:
         print("[WARN] No client_only list found in config — building full release.")
     else:
         print(f"[INFO] Excluding {len(excluded)} client-only mod(s).")
-    zip_path = release(version, exclude=excluded, exclude_categories={"shaderpacks", "resourcepacks"}, suffix="server")
+    excluded_overrides = get_side_only_overrides("client")
+    if excluded_overrides:
+        print(f"[INFO] Excluding {len(excluded_overrides)} client-only custom override mod(s).")
+    zip_path = release(version, exclude=excluded, exclude_categories={"shaderpacks", "resourcepacks"}, suffix="server", exclude_overrides=excluded_overrides)
     if zip_path:
         bake_server_updater()
     return zip_path
@@ -1399,12 +1568,20 @@ def export_cf(version: str) -> Path | None:
     modlist_html = "<ul>\n" + "\n".join(modlist_rows) + "\n</ul>\n"
 
     # Prepare bcc-common.toml content (update version/name in-place if stored, else create)
-    bcc_rel   = Path("config") / "bcc-common.toml"
-    bcc_src   = OVERRIDES_STORE / bcc_rel
+    # This is a client-side export, so drop server-only custom override mods.
+    bcc_rel_posix     = "config/bcc-common.toml"
+    server_only_overrides = get_side_only_overrides("server")
+    override_manifest = {
+        path: digest
+        for path, digest in load_override_manifest(commit_id).items()
+        if path not in server_only_overrides
+    }
     bcc_v_re  = re.compile(r'^([ \t]*modpackVersion\s*=\s*)"[^"]*"', re.MULTILINE)
     bcc_n_re  = re.compile(r'^([ \t]*modpackName\s*=\s*)"[^"]*"',    re.MULTILINE)
-    if bcc_src.exists():
-        bcc_text = bcc_src.read_text(encoding="utf-8")
+    bcc_digest = override_manifest.get(bcc_rel_posix)
+    bcc_blob   = (OVERRIDES_BLOBS / bcc_digest) if bcc_digest else None
+    if bcc_blob and bcc_blob.exists():
+        bcc_text = bcc_blob.read_text(encoding="utf-8")
         bcc_text = bcc_v_re.sub(rf'\g<1>"{version}"',      bcc_text)
         bcc_text = bcc_n_re.sub(rf'\g<1>"{modpack_name}"', bcc_text)
         print(f"  bcc-common.toml version stamped → {version}")
@@ -1425,16 +1602,16 @@ def export_cf(version: str) -> Path | None:
             zf.writestr("manifest.json", json.dumps(manifest, indent=2))
             zf.writestr("modlist.html",  modlist_html)
             override_file_count = 0
-            if OVERRIDES_STORE.is_dir():
-                for src_file in OVERRIDES_STORE.rglob("*"):
-                    if not src_file.is_file():
-                        continue
-                    rel = src_file.relative_to(OVERRIDES_STORE)
-                    if rel == bcc_rel:
-                        continue  # written separately below with updated version
-                    zf.write(src_file, f"overrides/{rel.as_posix()}")
-                    override_file_count += 1
-            zf.writestr(f"overrides/{bcc_rel.as_posix()}", bcc_text)
+            for rel_posix, digest in override_manifest.items():
+                if rel_posix == bcc_rel_posix:
+                    continue  # written separately below with updated version
+                blob = OVERRIDES_BLOBS / digest
+                if not blob.exists():
+                    print(f"  [WARN] Missing override blob for {rel_posix} — skipping.")
+                    continue
+                zf.write(blob, f"overrides/{rel_posix}")
+                override_file_count += 1
+            zf.writestr(f"overrides/{bcc_rel_posix}", bcc_text)
     except Exception as exc:
         print(f"[ERROR] Failed to write CurseForge zip: {exc}")
         return None
@@ -1475,11 +1652,20 @@ def _build_versions_json() -> dict:
         versions.append(version_entry)
     client_only_ids = sorted(get_filter_list("client_only"))
     server_only_ids = sorted(get_filter_list("server_only"))
+    client_only_overrides = sorted(get_side_only_overrides("client"))
+    server_only_overrides = sorted(get_side_only_overrides("server"))
+    custom_mod_names      = get_custom_mod_names()
     payload: dict = {"latest": log[-1]["version"] if log else None, "versions": versions}
     if client_only_ids:
         payload["client_only_ids"] = client_only_ids
     if server_only_ids:
         payload["server_only_ids"] = server_only_ids
+    if client_only_overrides:
+        payload["client_only_overrides"] = client_only_overrides
+    if server_only_overrides:
+        payload["server_only_overrides"] = server_only_overrides
+    if custom_mod_names:
+        payload["custom_mod_names"] = custom_mod_names
     return payload
 
 
@@ -1492,11 +1678,14 @@ def _get_notes_file_for_release(version: str, message: str = "", side: str = "")
     """
     release_exclude: set[str] | None = None
     release_exclude_categories: set[str] | None = None
+    release_exclude_overrides: set[str] | None = None
     if side == "client":
         release_exclude = get_filter_list("server_only")
+        release_exclude_overrides = get_side_only_overrides("server")
     elif side == "server":
         release_exclude = get_filter_list("client_only")
         release_exclude_categories = {"shaderpacks", "resourcepacks"}
+        release_exclude_overrides = get_side_only_overrides("client")
 
     log          = load_log()
     prev_version = None
@@ -1511,10 +1700,12 @@ def _get_notes_file_for_release(version: str, message: str = "", side: str = "")
     if prev_version:
         print(f"Generating notes comparing {prev_version} → {version}...")
         changelog(prev_version, version, out=str(notes_path), message=message,
-                  exclude=release_exclude, exclude_categories=release_exclude_categories)
+                  exclude=release_exclude, exclude_categories=release_exclude_categories,
+                  exclude_overrides=release_exclude_overrides)
     else:
         changelog(None, version, out=str(notes_path), message=message,
-                  exclude=release_exclude, exclude_categories=release_exclude_categories)
+                  exclude=release_exclude, exclude_categories=release_exclude_categories,
+                  exclude_overrides=release_exclude_overrides)
 
     return notes_path
 
@@ -1568,13 +1759,28 @@ def _write_pages_assets(dest: Path) -> None:
             save_snapshot(commit_id, snapshot_data)
         snapshot_out.write_text(json.dumps(snapshot_data, indent=2))
 
-    if OVERRIDES_STORE.exists() and any(OVERRIDES_STORE.rglob("*")):
-        overrides_zip_path = dest / "overrides.zip"
-        with zipfile.ZipFile(overrides_zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            for file_path in sorted(OVERRIDES_STORE.rglob("*")):
-                if file_path.is_file():
-                    arcname = file_path.relative_to(OVERRIDES_STORE)
-                    zf.write(file_path, arcname.as_posix())
+    # Publish per-commit override data so the client can fetch the exact override
+    # tree for any version: a manifest (path -> hash) it diffs to compute changes,
+    # and a zip of the file contents it applies. Both are immutable per commit.
+    overrides_dir = dest / "overrides"
+    for log_entry in load_log():
+        commit_id         = log_entry["commit"]
+        override_manifest = load_override_manifest(commit_id)
+        # Always publish the manifest (even when empty) so the client can diff cleanly.
+        (snapshots_dir / f"{commit_id}.overrides.json").write_text(
+            json.dumps(override_manifest, indent=2)
+        )
+        if not override_manifest:
+            continue
+        overrides_dir.mkdir(parents=True, exist_ok=True)
+        override_zip_out = overrides_dir / f"{commit_id}.zip"
+        if override_zip_out.exists():
+            continue  # already published — content is immutable per commit
+        with zipfile.ZipFile(override_zip_out, "w", zipfile.ZIP_DEFLATED) as zf:
+            for rel_posix, digest in sorted(override_manifest.items()):
+                blob = OVERRIDES_BLOBS / digest
+                if blob.exists():
+                    zf.write(blob, rel_posix)
 
 
 def _push_pages_assets() -> None:
@@ -1599,11 +1805,11 @@ def _push_pages_assets() -> None:
             shutil.copy2(PAGES_OUTPUT / "versions.json", "versions.json")
             if (PAGES_OUTPUT / "snapshots").exists():
                 shutil.copytree(PAGES_OUTPUT / "snapshots", "snapshots", dirs_exist_ok=True)
-            if (PAGES_OUTPUT / "overrides.zip").exists():
-                shutil.copy2(PAGES_OUTPUT / "overrides.zip", "overrides.zip")
+            if (PAGES_OUTPUT / "overrides").exists():
+                shutil.copytree(PAGES_OUTPUT / "overrides", "overrides", dirs_exist_ok=True)
             git_add_args = ["git", "add", "versions.json", "snapshots"]
-            if Path("overrides.zip").exists():
-                git_add_args.append("overrides.zip")
+            if Path("overrides").exists():
+                git_add_args.append("overrides")
             _run(git_add_args, check=True)
             _run(["git", "commit", "-m", "init: versions.json + snapshots"], check=True)
             _run(["git", "push", "-u", "origin", "gh-pages"], check=True)
@@ -1635,11 +1841,11 @@ def _push_pages_assets() -> None:
             shutil.copy2(PAGES_OUTPUT / "versions.json", worktree_path / "versions.json")
             if (PAGES_OUTPUT / "snapshots").exists():
                 shutil.copytree(PAGES_OUTPUT / "snapshots", worktree_path / "snapshots", dirs_exist_ok=True)
-            if (PAGES_OUTPUT / "overrides.zip").exists():
-                shutil.copy2(PAGES_OUTPUT / "overrides.zip", worktree_path / "overrides.zip")
+            if (PAGES_OUTPUT / "overrides").exists():
+                shutil.copytree(PAGES_OUTPUT / "overrides", worktree_path / "overrides", dirs_exist_ok=True)
             wt_git_add = ["git", "add", "versions.json", "snapshots"]
-            if (worktree_path / "overrides.zip").exists():
-                wt_git_add.append("overrides.zip")
+            if (worktree_path / "overrides").exists():
+                wt_git_add.append("overrides")
             _run(wt_git_add, check=True, cwd=worktree_path)
 
             try:
@@ -2379,6 +2585,9 @@ def remove_commit(version: str) -> None:
     snapshot_path = SNAPSHOTS / f"{commit_id}.json"
     if snapshot_path.exists():
         snapshot_path.unlink()
+    # Remove the override manifest too; blobs are content-addressed and may be
+    # shared with other commits, so they are intentionally left in place.
+    (SNAPSHOTS / f"{commit_id}.overrides.json").unlink(missing_ok=True)
 
     print(f"[OK] Version {version} removed from history.")
 
