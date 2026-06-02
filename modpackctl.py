@@ -487,18 +487,16 @@ def load_override_manifest(commit_id: str) -> dict[str, str]:
     return load_json(SNAPSHOTS / f"{commit_id}.overrides.json", {})
 
 
-def apply_overrides(dest: Path, commit_id: str, exclude_paths: set[str] | None = None) -> bool:
+def apply_overrides(dest: Path, commit_id: str, exclude_paths: set[str] | None = None) -> int:
     """
     Reconstruct a commit's exact override tree from the blob store into dest
     (the release build directory). Override paths in exclude_paths are skipped
     (used to drop client-only / server-only custom mods from a side's build).
-    Returns True if any files were written.
+    Returns the number of override files written.
     """
     exclude_paths = exclude_paths or set()
     manifest = load_override_manifest(commit_id)
-    if not manifest:
-        return False
-    wrote_any = False
+    count = 0
     for relative_path, digest in manifest.items():
         if relative_path in exclude_paths:
             continue
@@ -509,8 +507,8 @@ def apply_overrides(dest: Path, commit_id: str, exclude_paths: set[str] | None =
         out_path = dest / relative_path
         out_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(blob_path, out_path)
-        wrote_any = True
-    return wrote_any
+        count += 1
+    return count
 
 
 # -------------------------
@@ -1348,7 +1346,7 @@ def update(
     commit_id    = get_commit(version)
     if not commit_id:
         print(f"[ERROR] Version '{version}' not found.")
-        return {"downloaded": 0, "cached": 0, "failed": 0, "ok": 0, "overrides": False}
+        return {"downloaded": 0, "cached": 0, "failed": 0, "ok": 0, "overrides": 0}
 
     snapshot = load_snapshot(commit_id)
 
@@ -1427,9 +1425,9 @@ def update(
     # Merge the version's override tree (configs, custom mods, etc.) on top of the
     # downloaded mods so BUILD/ mirrors the final .minecraft layout. Side-only custom
     # mods are dropped here for client/server builds.
-    overrides_included = apply_overrides(BUILD, commit_id, exclude_paths=exclude_overrides)
-    if overrides_included:
-        print("  Overrides merged into build.")
+    override_count = apply_overrides(BUILD, commit_id, exclude_paths=exclude_overrides)
+    if override_count:
+        print(f"  {override_count} override file(s) merged into build.")
 
     ok      = downloaded + cached
     summary = f"{ok} mods: {downloaded} downloaded, {cached} from cache"
@@ -1442,7 +1440,7 @@ def update(
             print(f"  [i] README.md updated.")
 
     return {"downloaded": downloaded, "cached": cached, "failed": failed, "ok": ok,
-            "overrides": overrides_included}
+            "overrides": override_count}
 
 
 # -------------------------
@@ -1479,7 +1477,7 @@ def release(version: str, side: str = "client") -> Path | None:
         print("[ERROR] Release aborted: not all mods could be fetched.")
         return None
 
-    overrides_included = stats["overrides"]
+    override_count = stats["overrides"]
 
     if not any(BUILD.rglob("*")):
         print("[ERROR] Release aborted: build folder is empty.")
@@ -1507,7 +1505,7 @@ def release(version: str, side: str = "client") -> Path | None:
     print(f"  Downloaded       : {stats['downloaded']}")
     print(f"  From cache       : {stats['cached']}")
     print(f"  Failed           : {stats['failed']}")
-    print(f"  Overrides        : {'yes' if overrides_included else 'no'}")
+    print(f"  Overrides        : {override_count}")
     print(f"  Output           : {zip_name}")
     print(f"{'=' * 36}\n")
     print(f"[OK] Built {zip_name}")

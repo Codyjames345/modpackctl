@@ -295,19 +295,48 @@ def collect_wipe_targets(install_dir: Path, folder_names: list[str]) -> list[tup
     return targets
 
 
-def locate_existing_file(project_id: str, entry: dict, mods_dir: Path) -> Path | None:
+def classify_downloaded_file(path: Path) -> str:
+    """Inspect a downloaded file and return 'mods', 'shaderpacks', or 'resourcepacks'."""
+    if path.suffix.lower() != ".zip":
+        return "mods"
+    try:
+        with zipfile.ZipFile(path, "r") as zf:
+            member_names = zf.namelist()
+        if any(name == "shaders/" or name.startswith("shaders/") for name in member_names):
+            return "shaderpacks"
+        return "resourcepacks"
+    except zipfile.BadZipFile:
+        return "mods"
+
+
+# Folders a mod file may live in. The server only installs mods (filter_for_server strips
+# the rest), but lookups search all three so existing files are found wherever they are.
+_INSTALL_CATEGORIES = ("mods", "shaderpacks", "resourcepacks")
+
+
+def locate_existing_file(project_id: str, entry: dict, install_dir: Path) -> Path | None:
     """
-    Find the on-disk file for a mod entry inside mods_dir.
-    Tries exact filename first, then a substring match by project_id.
+    Find the on-disk file for a mod entry under install_dir. Prefers an exact filename
+    match in the entry's expected category, then falls back to all category folders,
+    then to a substring match by project_id. Mirrors the client updater's lookup.
     """
+    expected_category = entry.get("category", "mods")
     expected_filename = entry.get("file", "")
+
     if expected_filename:
-        exact = mods_dir / expected_filename
+        exact = install_dir / expected_category / expected_filename
         if exact.exists():
             return exact
+        for category in _INSTALL_CATEGORIES:
+            candidate = install_dir / category / expected_filename
+            if candidate.exists():
+                return candidate
 
-    if mods_dir.is_dir():
-        for file_path in mods_dir.iterdir():
+    for category in _INSTALL_CATEGORIES:
+        category_dir = install_dir / category
+        if not category_dir.is_dir():
+            continue
+        for file_path in category_dir.iterdir():
             if project_id in file_path.stem:
                 return file_path
     return None
@@ -413,7 +442,7 @@ def write_installed_version(server_dir: Path, version: str) -> None:
 # UPDATE PLAN
 # -------------------------
 
-def build_update_plan(old_snapshot: dict, new_snapshot: dict, mods_dir: Path) -> dict:
+def build_update_plan(old_snapshot: dict, new_snapshot: dict, install_dir: Path) -> dict:
     """
     Build an ordered list of operations to migrate from old_snapshot to new_snapshot.
     Returns dict with:
@@ -425,12 +454,12 @@ def build_update_plan(old_snapshot: dict, new_snapshot: dict, mods_dir: Path) ->
     delete:   list = []
 
     for project_id, old_entry in changes["removed"]:
-        existing = locate_existing_file(project_id, old_entry, mods_dir)
+        existing = locate_existing_file(project_id, old_entry, install_dir)
         if existing:
             delete.append((existing, old_entry["name"]))
 
     for project_id, old_entry, new_entry in changes["updated"]:
-        existing = locate_existing_file(project_id, old_entry, mods_dir)
+        existing = locate_existing_file(project_id, old_entry, install_dir)
         if existing:
             delete.append((existing, old_entry["name"]))
         download.append((project_id, new_entry["file_id"], new_entry["name"], True))
@@ -794,7 +823,7 @@ def main() -> None:
 
     # ---- Build plan ----
     mods_dir.mkdir(parents=True, exist_ok=True)
-    plan = build_update_plan(old_snapshot, new_snapshot, mods_dir)
+    plan = build_update_plan(old_snapshot, new_snapshot, server_dir)
     if fresh:
         for folder_name in fresh_wipe_dirs:
             plan["delete"].extend(collect_wipe_targets(server_dir, [folder_name]))
@@ -873,7 +902,13 @@ def main() -> None:
                     print(f"  [WARN] Could not delete {file_path.name}: {error}")
 
             for src_path, display_name in downloaded:
-                shutil.move(str(src_path), mods_dir / src_path.name)
+                category = classify_downloaded_file(src_path)
+                dest_dir = server_dir / category
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                destination = dest_dir / src_path.name
+                if destination.exists():
+                    destination.unlink()
+                shutil.move(str(src_path), str(destination))
     else:
         # Only deletions
         for file_path, display_name in plan["delete"]:
