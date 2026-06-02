@@ -415,15 +415,6 @@ def get_modloader_version(manifest: dict) -> str:
     return loaders[0].get("id", "") if loaders else ""
 
 
-def _modloader_display(modloader_id: str) -> str:
-    """Convert a manifest modloader id (e.g. 'neoforge-21.1.229') to 'NeoForge 21.1.229'."""
-    if "-" in modloader_id:
-        prefix, version = modloader_id.split("-", 1)
-        name = _LOADER_DISPLAY_NAMES.get(prefix.lower(), prefix.capitalize())
-        return f"{name} {version}"
-    return modloader_id
-
-
 def _override_member_allowed(relative_path: str) -> bool:
     """
     Return True if an overrides/ member should be version-controlled.
@@ -933,10 +924,11 @@ def download_mod(project_id: str, file_id: str, force: bool = False) -> dict:
 # -------------------------
 
 
-def _render_readme(version: str) -> bool:
+def render_readme(version: str) -> bool:
     """
     Render README.md by substituting all known placeholders in README.template.md
     with their current values. The template is left untouched. Returns True if written.
+    No-op (returns False) when README.template.md does not exist.
     """
     if not README_TEMPLATE.exists():
         return False
@@ -1040,9 +1032,7 @@ def commit(source: str, major: bool = False, message: str = "",
     # version, exactly as changing a CurseForge file id would.
     override_manifest = extract_override_manifest(source)
     if override_manifest:
-        commit_id = hashlib.sha1(
-            json.dumps({"mods": bare_mods, "overrides": override_manifest}, sort_keys=True).encode()
-        ).hexdigest()[:10]
+        commit_id = hash_state({"mods": bare_mods, "overrides": override_manifest})
     else:
         # Preserve the legacy hash for mod-only packs so existing repos stay stable.
         commit_id = hash_state(bare_mods)
@@ -1435,10 +1425,6 @@ def update(
         summary += f", {failed} failed"
     print(f"\n[OK] Updated to {label}  ({summary})")
 
-    if suffix != "server":
-        if _render_readme(version):
-            print(f"  [i] README.md updated.")
-
     return {"downloaded": downloaded, "cached": cached, "failed": failed, "ok": ok,
             "overrides": override_count}
 
@@ -1509,6 +1495,10 @@ def release(version: str, side: str = "client") -> Path | None:
     print(f"  Output           : {zip_name}")
     print(f"{'=' * 36}\n")
     print(f"[OK] Built {zip_name}")
+
+    # Render README.md from the template for client builds (server builds never touch it).
+    if side == "client" and render_readme(version):
+        print("  [i] README.md updated.")
 
     # Refresh the local gh-pages/ folder so versions.json, snapshots, and per-commit
     # override data reflect this version (publish() pushes this folder to the branch).
@@ -2171,7 +2161,7 @@ def _push_working_dir(version: str) -> bool:
             print(f"[OK] Created README.template.md — edit it to customise your README.")
 
     if README_TEMPLATE.exists():
-        if _render_readme(version):
+        if render_readme(version):
             print("[OK] README.md rendered from template.")
     elif not README.exists():
         print("[WARN] No README.template.md or README.md found — skipping README.")
@@ -2759,6 +2749,13 @@ if __name__ == "__main__":
     # build-pages
     subparsers.add_parser("build-pages", help="Build versions.json + snapshots/ locally to gh-pages/")
 
+    # push-pages
+    subparsers.add_parser("push-pages", help="Push the existing gh-pages/ folder to the gh-pages branch")
+
+    # render-readme
+    parser_render_readme = subparsers.add_parser("render-readme", help="Render README.md from README.template.md for a version")
+    parser_render_readme.add_argument("version", nargs="?", default=None, help="Version to render for (default: latest)")
+
     # bake-updater
     parser_bake = subparsers.add_parser("bake-updater", help="Bake the updater script with config values")
     bake_side = parser_bake.add_mutually_exclusive_group()
@@ -2893,6 +2890,28 @@ if __name__ == "__main__":
 
     elif args.command == "build-pages":
         build_pages()
+
+    elif args.command == "push-pages":
+        if not REPO.exists():
+            print("[ERROR] Repository not initialized. Run 'init' first.")
+            sys.exit(1)
+        if not (PAGES_OUTPUT / "versions.json").exists():
+            print(f"[ERROR] No built gh-pages assets in {PAGES_OUTPUT}/. Run 'build-pages' first.")
+            sys.exit(1)
+        _push_pages_assets()
+
+    elif args.command == "render-readme":
+        version = args.version
+        if version is None:
+            log = load_log()
+            if not log:
+                print("[ERROR] No committed versions found.")
+                sys.exit(1)
+            version = log[-1]["version"]
+        if render_readme(version):
+            print("[OK] README.md rendered from template.")
+        else:
+            print("[INFO] No README.template.md found — nothing to render.")
 
     elif args.command == "bake-updater":
         if args.server:

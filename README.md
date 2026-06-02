@@ -229,9 +229,11 @@ python modpackctl.py publish --message "Improved performance and fixed crashes."
 | `changelog [v1] [v2] [--out output.md] [--server]` | Generate a changelog. With no versions, generates a single-version changelog for the latest version. With one version, treats it as an initial release. With two versions, diffs between them. `--server` excludes client-only mods, shaderpacks, and resourcepacks. |
 | `release [version] [--server]` | Build a release zip and update `gh-pages/` locally. Client (default): also builds a CurseForge export zip, bakes `releases/{file_prefix}-client-updater.py`, and compiles `releases/{file_prefix}-client-updater.exe` (if PyInstaller is available). `--server`: bakes `releases/{file_prefix}-server-updater.py` instead (no exe, no CurseForge zip). `version` defaults to the latest committed version if omitted. |
 | `publish [version] [--message "..."]` | Build a client release (calls `release` internally), create a GitHub Release with client-filtered changelog notes, push `versions.json` and `snapshots/` to `gh-pages`, and push an updated `README.md` and `.gitignore` to the working repo. Uploads the zip, baked `.py`, and `.exe` (if built). `version` defaults to the latest committed version if omitted. `--message` overrides the message set at `commit` time. |
-| `update [version] [--server]` | Rebuild the `build/` folder for a version without zipping or producing any release artifacts. Defaults to client view; `--server` excludes client-only mods, shaderpacks, and resourcepacks. `version` defaults to the latest committed version if omitted. |
+| `update [version] [--server]` | Rebuild the `build/` folder for a version (mods + merged overrides, mirroring `.minecraft`) without zipping. Defaults to client view; `--server` excludes client-only mods, shaderpacks, and resourcepacks. `version` defaults to the latest committed version if omitted. |
 | `purge [--all]` | Remove stale files from the download cache. Without `--all`, only removes cached files not in the latest snapshot. |
 | `build-pages` | Write `versions.json`, `snapshots/` (including per-commit override manifests), and per-commit `overrides/<commit>.zip` files to a local `gh-pages/` folder. Also runs automatically as part of `release`. Useful for a standalone refresh or manually pushing to `gh-pages` if `publish` fails. |
+| `push-pages` | Push the already-built local `gh-pages/` folder to the `gh-pages` branch (run `build-pages` first). Useful for retrying the publish step if `publish`'s gh-pages push failed. |
+| `render-readme [version]` | Render `README.md` from `README.template.md` with current values for the given version (default: latest). No-op if no template exists. Also runs automatically during a client `release`. |
 | `bake-updater [--server]` | Bake `releases/{file_prefix}-client-updater.py` from the client updater template. `--server` bakes `releases/{file_prefix}-server-updater.py` instead (no exe). |
 | `reset-file --client\|--server\|--config\|--all` | Reset a working copy in the current directory from its example template. `--client` overwrites `client-updater.py`, `--server` overwrites `server-updater.py`, `--config` overwrites `modpackctl.toml` with `modpackctl.example.toml`, `--all` resets all three. A flag is required. If an example template is missing from the modpackctl install directory it is downloaded from the modpackctl GitHub repo automatically. |
 | `build-exe` | Build `releases/{file_prefix}-client-updater.exe` from the baked client updater using PyInstaller. When `enable_secret` is true, also downloads and bundles the easter egg video and audio. Requires `pip install pyinstaller yt-dlp imageio-ffmpeg Pillow`. Also runs automatically as part of `release`. |
@@ -281,7 +283,7 @@ The flow:
 1. **Folder picker** — autodetects a likely `.minecraft` folder and remembers the last choice between runs.
 2. **Checking** — fetches `versions.json` from GitHub Pages.
 3. **Version select** — dropdown defaulting to the latest version; includes a **Fresh install** checkbox to wipe existing files and re-download everything clean. On confirm, the relevant snapshots are fetched from GitHub Pages.
-4. **Changelog** — shows exactly what will be added, removed, and updated, by name.
+4. **Changelog** — shows exactly what will be added, removed, and updated, grouped by destination folder (`mods/`, `shaderpacks/`, `resourcepacks/`, `config/`, …).
 5. **Confirm & Update** — explicit click before any files are touched.
 6. **Atomic install** — all new files download to a temp folder first; if anything fails the install is left untouched.
 7. **Outcome** — clear success/error summary.
@@ -301,6 +303,7 @@ Use these placeholders as plain string literals anywhere in `client-updater.exam
 | `"__ENABLE_SECRET__"` | `settings.enable_secret` as `True` or `False` (default: `True`) |
 | `"__SECRET_VIDEO_URL__"` | `settings.secret_video_url`, or the default Never Gonna Give You Up URL |
 | `"__ENABLE_RAINBOW__"` | `settings.enable_rainbow` as `True` or `False` (default: `False`) |
+| `"__RAINBOW_BPM__"` | `settings.rainbow_bpm` as a float (default: `113.0`) — positive; malformed values abort the bake |
 | `"__BEAT_DROP_SECONDS__"` | `settings.beat_drop` as a float (default: `44.0`) — non-negative; malformed values abort the bake |
 | `"__COLOUR_DEFAULTS_JSON__"` | JSON dict of the 11 theme colours, validated against `[settings.colours]` in `modpackctl.toml` |
 
@@ -335,6 +338,7 @@ python server-updater.py [server_dir] [--version VERSION] [--fresh] [--yes] [--w
 | `--version VERSION` | Target version to install. Defaults to latest. |
 | `--fresh` | Wipe the mods folder and re-download everything clean. |
 | `--no-fresh` | Force an incremental update even if no version is detected. |
+| `--reset-overrides` | Wipe and re-extract every overrides folder (config/, kubejs/, etc.), discarding local edits. |
 | `--yes` | Skip the confirmation prompt (useful for automated deployments). |
 | `--workers N` | Number of parallel download workers (default: 10). |
 
