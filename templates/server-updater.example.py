@@ -464,17 +464,41 @@ def _group_deletes_by_folder(
     return grouped
 
 
-def print_delete_tree(deletes: list[tuple[Path, str]], install_dir: Path) -> None:
-    """Print a folder-grouped tree of files queued for deletion."""
-    grouped = _group_deletes_by_folder(deletes, install_dir)
+def print_grouped_tree(grouped: dict[str, list[str]]) -> None:
+    """
+    Print a folder-grouped tree: 'folder/' headers with '|_ name' leaves. Entries with
+    an empty folder key (zip-root files) print as flat '- name' lines.
+    """
     for folder in sorted(grouped):
+        files = sorted(grouped[folder], key=str.lower)
+        if not files:
+            continue
         if folder:
-            print(f"    {folder}")
-            for name in sorted(grouped[folder], key=str.lower):
+            print(f"    {folder}/")
+            for name in files:
                 print(f"      |_ {name}")
         else:
-            for name in sorted(grouped[folder], key=str.lower):
+            for name in files:
                 print(f"    - {name}")
+
+
+def print_delete_tree(deletes: list[tuple[Path, str]], install_dir: Path) -> None:
+    """Print a folder-grouped tree of files queued for deletion."""
+    print_grouped_tree(_group_deletes_by_folder(deletes, install_dir))
+
+
+def group_downloads_by_category(downloads: list, new_snapshot: dict, is_update_wanted: bool) -> dict[str, list[str]]:
+    """
+    Group CurseForge mod downloads by their destination folder (the snapshot category;
+    always mods/ on the server, since shaderpacks/resourcepacks are filtered out).
+    """
+    grouped: dict[str, list[str]] = {}
+    for project_id, _file_id, name, is_upd in downloads:
+        if is_upd != is_update_wanted:
+            continue
+        category = (new_snapshot.get(project_id) or {}).get("category") or "mods"
+        grouped.setdefault(category, []).append(name)
+    return grouped
 
 
 def print_changelog(
@@ -490,8 +514,10 @@ def print_changelog(
         changes = diff_snapshots(old_snapshot, new_snapshot)
         if changes["added"]:
             print(f"\n  To Download ({len(changes['added'])}):")
-            for _, entry in changes["added"]:
-                print(f"    + {entry['name']}")
+            grouped: dict[str, list[str]] = {}
+            for _project_id, entry in changes["added"]:
+                grouped.setdefault(entry.get("category") or "mods", []).append(entry["name"])
+            print_grouped_tree(grouped)
         else:
             print("\n  To Download: (none)")
 
@@ -505,15 +531,14 @@ def print_changelog(
         else:
             print("\n  To Delete: (none)")
     elif plan is not None:
-        added_names   = sorted([name for _, _, name, is_upd in plan["download"] if not is_upd], key=str.lower)
-        updated_names = sorted([name for _, _, name, is_upd in plan["download"] if is_upd], key=str.lower)
+        added_names   = [name for _, _, name, is_upd in plan["download"] if not is_upd]
+        updated_names = [name for _, _, name, is_upd in plan["download"] if is_upd]
         _updated_set  = set(updated_names)
         removed_entries = [(p, name) for p, name in plan["delete"] if name not in _updated_set]
 
         if added_names:
             print(f"\n  Added ({len(added_names)}):")
-            for name in added_names:
-                print(f"    + {name}")
+            print_grouped_tree(group_downloads_by_category(plan["download"], new_snapshot, False))
         if removed_entries:
             print(f"\n  Removed ({len(removed_entries)}):")
             if install_dir is not None:
@@ -523,8 +548,7 @@ def print_changelog(
                     print(f"    - {name}")
         if updated_names:
             print(f"\n  Updated ({len(updated_names)}):")
-            for name in updated_names:
-                print(f"    ~ {name}")
+            print_grouped_tree(group_downloads_by_category(plan["download"], new_snapshot, True))
         if not added_names and not removed_entries and not updated_names:
             print("\n  No changes.")
     else:

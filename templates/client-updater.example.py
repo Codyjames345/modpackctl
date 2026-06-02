@@ -1798,6 +1798,26 @@ class UpdaterApp(tk.Tk):
                     grouped = group_deletes_by_folder(removed_entries, self.modpack_dir)
                     render_grouped(grouped, "removed")
 
+                def group_downloads(is_update_wanted: bool) -> dict[str, list[str]]:
+                    """Group CurseForge mod downloads by their destination folder
+                    (mods/, shaderpacks/, resourcepacks/) using the snapshot category."""
+                    grouped: dict[str, list[str]] = {}
+                    for project_id, _file_id, name, is_upd in _plan["download"]:
+                        if is_upd != is_update_wanted:
+                            continue
+                        entry = self.new_snapshot.get(project_id) or {}
+                        category = entry.get("category") or "mods"
+                        grouped.setdefault(category, []).append(name)
+                    return grouped
+
+                def merge_grouped(*groups: dict) -> dict[str, list[str]]:
+                    """Combine several {folder: [name]} dicts into one."""
+                    out: dict[str, list[str]] = {}
+                    for group in groups:
+                        for folder, files in group.items():
+                            out.setdefault(folder, []).extend(files)
+                    return out
+
                 # Body
                 text.config(state="normal")
                 text.delete("1.0", "end")
@@ -1805,19 +1825,14 @@ class UpdaterApp(tk.Tk):
                 if self.fresh_install:
                     text.insert("end", "To Download\n", "section_added")
                     text.insert("end", "\n")
-                    changes = diff_snapshots(self.old_snapshot, self.new_snapshot)
-                    has_any = bool(changes["added"]) or override_added_count or override_updated_count
-                    if has_any:
-                        for _, entry in changes["added"]:
-                            text.insert("end", f"  + {entry['name']}\n", "added")
-                        # Fresh install groups both buckets under "to download" since
-                        # there's no separate update section in this mode.
-                        merged: dict[str, list[str]] = {}
-                        for folder, files in override_added.items():
-                            merged.setdefault(folder, []).extend(files)
-                        for folder, files in override_updated.items():
-                            merged.setdefault(folder, []).extend(files)
-                        render_grouped(merged, "added")
+                    # Everything that ends up on disk, grouped by destination folder
+                    # (mods/, shaderpacks/, resourcepacks/, config/, …).
+                    download_grouped = merge_grouped(
+                        group_downloads(False), group_downloads(True),
+                        override_added, override_updated,
+                    )
+                    if download_grouped:
+                        render_grouped(download_grouped, "added")
                     else:
                         text.insert("end", "  Nothing to download.\n", "placeholder")
                     text.insert("end", "\n")
@@ -1829,12 +1844,13 @@ class UpdaterApp(tk.Tk):
                     else:
                         text.insert("end", "  Nothing to delete.\n", "placeholder")
                 else:
+                    added_grouped   = merge_grouped(group_downloads(False), override_added)
+                    updated_grouped = merge_grouped(group_downloads(True), override_updated)
+
                     text.insert("end", "Added\n", "section_added")
                     text.insert("end", "\n")
-                    if added_names or override_added_count:
-                        for name in added_names:
-                            text.insert("end", f"  + {name}\n", "added")
-                        render_grouped(override_added, "added")
+                    if added_grouped:
+                        render_grouped(added_grouped, "added")
                     else:
                         text.insert("end", "  No files added.\n", "placeholder")
                     text.insert("end", "\n")
@@ -1849,10 +1865,8 @@ class UpdaterApp(tk.Tk):
 
                     text.insert("end", "Updated\n", "section_updated")
                     text.insert("end", "\n")
-                    if updated_names or override_updated_count:
-                        for name in updated_names:
-                            text.insert("end", f"  ~ {name}\n", "updated")
-                        render_grouped(override_updated, "updated")
+                    if updated_grouped:
+                        render_grouped(updated_grouped, "updated")
                     else:
                         text.insert("end", "  No files updated.\n", "placeholder")
 
