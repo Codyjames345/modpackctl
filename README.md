@@ -222,7 +222,7 @@ python modpackctl.py publish --message "Improved performance and fixed crashes."
 | Command | Description |
 |---|---|
 | `init <zip> [--force]` | Initialize from a CurseForge export zip. `--force` resets history but keeps the download cache. |
-| `commit <zip> [--major] [--message "..."]` | Record a new version from an updated export. Version is bumped automatically. `--major` forces a major bump. `--message` sets the release note shown to players in the updater changelog. |
+| `commit <zip> [--major \| --version X.Y.Z] [--message "..."]` | Record a new version from an updated export. Version is bumped automatically. `--major` forces a major bump; `--version` sets an explicit version instead (must be clean `x.y.z` and greater than the latest). `--message` sets the release note shown to players in the updater changelog. |
 | `log` | List all committed versions with diff stats. |
 | `remove-commit [version]` | Permanently remove a committed version from history. Prompts for confirmation. Irreversible. `version` defaults to the latest committed version if omitted. |
 | `set-message [version] [message]` | Set the release note for any committed version. `version` defaults to the latest committed version if omitted. Omit the message to clear it. |
@@ -245,6 +245,8 @@ Versions follow `major.minor.patch`. The next version is calculated automaticall
 - Files updated only → patch bump
 - Modloader version changes → major bump (automatic)
 - `--major` flag → always bumps major
+
+To take manual control (e.g. a milestone or marketing version), pass `commit --version X.Y.Z`. It must be a clean `x.y.z` number greater than the latest committed version, and subsequent commits resume auto-bumping from it. The version set in the CurseForge export's `manifest.json` is intentionally **not** used for this — it's free-form text that would break the strict ordering the updater and `bcc-common.toml` rely on.
 
 ## README Auto-Update
 
@@ -385,7 +387,7 @@ Side-only custom mods are dropped from the opposite side's release zip, CurseFor
   overrides_blobs/  — content-addressed store of override file contents (deduplicated across versions)
   dl_cache/         — persistent jar store (avoids re-downloading on rebuild)
 .pyinstaller/       — PyInstaller build cache (not committed)
-build/              — current working build (mods/, shaderpacks/, resourcepacks/)
+build/              — current working build mirroring .minecraft (mods/ + merged overrides: config/, kubejs/, etc.)
 releases/           — output zips, {file_prefix}-updater.py, and {file_prefix}-updater.exe
 modpackctl.toml     — your config (not committed)
 ```

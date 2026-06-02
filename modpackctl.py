@@ -291,6 +291,28 @@ def get_side_only_overrides(side: str) -> set[str]:
     return {path for path, meta in get_custom_mods().items() if meta["side"] == side}
 
 
+def _side_filters(side: str) -> dict:
+    """
+    Return the build/changelog exclusion filters for a release side.
+
+    'server' drops client-only mods and custom override mods plus shaderpacks and
+    resourcepacks; 'client' (the default) drops server-only mods and custom override
+    mods. Shared by release(), the changelog notes, and the update CLI so the three
+    stay in sync.
+    """
+    if side == "server":
+        return {
+            "exclude":            get_filter_list("client_only"),
+            "exclude_categories": {"shaderpacks", "resourcepacks"},
+            "exclude_overrides":  get_side_only_overrides("client"),
+        }
+    return {
+        "exclude":            get_filter_list("server_only"),
+        "exclude_categories": None,
+        "exclude_overrides":  get_side_only_overrides("server"),
+    }
+
+
 # -------------------------
 # HELPERS
 # -------------------------
@@ -794,6 +816,25 @@ def bump_major(version: str) -> str:
     return f"{major + 1}.0.0"
 
 
+def validate_manual_version(version: str, old_version: str) -> str:
+    """
+    Validate a maintainer-supplied version (from 'commit --version').
+
+    The whole tool — version ordering, the updater's "is this newer?" check, and the
+    bcc-common.toml comparison — assumes clean, strictly increasing x.y.z versions, so a
+    manual version must match that and be greater than the latest committed version.
+    Exits with a clear error otherwise. Returns the normalised version string.
+    """
+    version = version.strip().lstrip("vV").strip()
+    if not re.fullmatch(r"\d+\.\d+\.\d+", version):
+        print(f"[ERROR] --version must be a plain x.y.z number (e.g. 2.0.0), got: {version!r}")
+        sys.exit(1)
+    if old_version and parse_version(version) <= parse_version(old_version):
+        print(f"[ERROR] --version {version} must be greater than the latest committed version {old_version}.")
+        sys.exit(1)
+    return version
+
+
 # -------------------------
 # FILENAME GUESSING
 # -------------------------
@@ -971,13 +1012,16 @@ def init(source: str, force: bool = False) -> None:
 # -------------------------
 
 
-def commit(source: str, major: bool = False, message: str = "") -> tuple[str, str, int] | None:
+def commit(source: str, major: bool = False, message: str = "",
+           version_override: str | None = None) -> tuple[str, str, int] | None:
     """
     Record a new version from an updated CurseForge export zip.
 
-    Automatically bumps the major version when the modloader id changes between
-    commits (e.g. a NeoForge update). The --major flag forces a major bump
-    regardless. Returns (version, commit_id, mod_count), or None if nothing changed.
+    By default the version is bumped automatically from the diff (added/removed →
+    minor, updates → patch) and a modloader change forces a major bump. The --major
+    flag forces a major bump regardless. version_override (from 'commit --version')
+    sets an explicit x.y.z version instead, validated to be clean and increasing.
+    Returns (version, commit_id, mod_count), or None if nothing changed.
     """
     validate_source(source)
 
@@ -1034,7 +1078,10 @@ def commit(source: str, major: bool = False, message: str = "") -> tuple[str, st
         old_version and old_modloader and new_modloader and old_modloader != new_modloader
     )
 
-    if not old_version:
+    if version_override is not None:
+        # Maintainer takes manual control; their version wins over auto/major bumps.
+        version = validate_manual_version(version_override, old_version)
+    elif not old_version:
         version = "1.0.0"
     elif major or modloader_changed:
         version = bump_major(old_version)
@@ -1133,27 +1180,10 @@ def changelog(
             )
         }
 
-    if v1 is None:
-        changes       = diff({}, apply_side_filter(load_snapshot(new_commit_id)))
-        header_title  = f"# Changelog: {v2} (Initial Release)"
-        old_modloader = ""
-    else:
-        old_commit_id = get_commit(v1)
-        if not old_commit_id:
-            print(f"[ERROR] Version '{v1}' not found in log.")
-            return
-        changes       = diff(
-            apply_side_filter(load_snapshot(old_commit_id)),
-            apply_side_filter(load_snapshot(new_commit_id)),
-        )
-        header_title  = f"# Changelog: {v1} → {v2}"
-        old_entry     = get_log_entry(v1)
-        old_modloader = old_entry.get("modloader", "") if old_entry else ""
-
-    # Override files are version-controlled too: diff their per-commit manifests.
-    # exclude (project IDs) doesn't apply to overrides, but exclude_categories does for
-    # files under a shaderpacks/ or resourcepacks/ top folder, and exclude_overrides
-    # drops client-only / server-only custom mods by path.
+    # Override files are version-controlled too: their per-commit manifests are diffed
+    # alongside the mods. exclude (project IDs) doesn't apply to overrides, but
+    # exclude_categories does for files under a shaderpacks/ or resourcepacks/ top folder,
+    # and exclude_overrides drops client-only / server-only custom mods by path.
     def apply_override_filter(manifest: dict) -> dict:
         if not exclude_categories and not excluded_override_paths:
             return manifest
@@ -1165,10 +1195,26 @@ def changelog(
         }
 
     new_override_manifest = apply_override_filter(load_override_manifest(new_commit_id))
+
     if v1 is None:
-        old_override_manifest: dict = {}
+        changes               = diff({}, apply_side_filter(load_snapshot(new_commit_id)))
+        header_title          = f"# Changelog: {v2} (Initial Release)"
+        old_modloader         = ""
+        old_override_manifest: dict[str, str] = {}
     else:
-        old_override_manifest = apply_override_filter(load_override_manifest(get_commit(v1)))
+        old_commit_id = get_commit(v1)
+        if not old_commit_id:
+            print(f"[ERROR] Version '{v1}' not found in log.")
+            return
+        changes               = diff(
+            apply_side_filter(load_snapshot(old_commit_id)),
+            apply_side_filter(load_snapshot(new_commit_id)),
+        )
+        header_title          = f"# Changelog: {v1} → {v2}"
+        old_entry             = get_log_entry(v1)
+        old_modloader         = old_entry.get("modloader", "") if old_entry else ""
+        old_override_manifest = apply_override_filter(load_override_manifest(old_commit_id))
+
     override_changes = diff_overrides(old_override_manifest, new_override_manifest)
 
     modloader_changed = bool(
@@ -1281,24 +1327,28 @@ def update(
     exclude: set[str] | None = None,
     exclude_categories: set[str] | None = None,
     suffix: str = "",
+    exclude_overrides: set[str] | None = None,
 ) -> dict:
     """
-    Clear the build directory and rebuild it cleanly for the given version.
+    Clear the build directory and rebuild it cleanly for the given version, so that
+    BUILD/ mirrors the final .minecraft folder structure (mods plus the merged
+    override tree: configs, custom mods, etc.).
 
     Every mod in the snapshot is copied from DL_CACHE if present, otherwise
     downloaded from CurseForge and cached for future use. Excluded project IDs
     are skipped entirely (used to produce client-only or server-only builds).
     Mods whose category (from the existing index) is in exclude_categories are
     also skipped — used to drop shaderpacks and resourcepacks from server builds.
+    exclude_overrides drops specific override paths (side-only custom mods).
 
     suffix is a display label ('client' or 'server') appended to output messages.
-    Returns a stats dict: { downloaded, cached, failed, ok }.
+    Returns a stats dict: { downloaded, cached, failed, ok, overrides }.
     """
     excluded_ids = {str(project_id) for project_id in exclude} if exclude else set()
     commit_id    = get_commit(version)
     if not commit_id:
         print(f"[ERROR] Version '{version}' not found.")
-        return {"downloaded": 0, "cached": 0, "failed": 0, "ok": 0}
+        return {"downloaded": 0, "cached": 0, "failed": 0, "ok": 0, "overrides": False}
 
     snapshot = load_snapshot(commit_id)
 
@@ -1374,7 +1424,12 @@ def update(
                 }
         save_snapshot(commit_id, snapshot)
 
-    (BUILD / "modpack_version.txt").write_text(version)
+    # Merge the version's override tree (configs, custom mods, etc.) on top of the
+    # downloaded mods so BUILD/ mirrors the final .minecraft layout. Side-only custom
+    # mods are dropped here for client/server builds.
+    overrides_included = apply_overrides(BUILD, commit_id, exclude_paths=exclude_overrides)
+    if overrides_included:
+        print("  Overrides merged into build.")
 
     ok      = downloaded + cached
     summary = f"{ok} mods: {downloaded} downloaded, {cached} from cache"
@@ -1386,7 +1441,8 @@ def update(
         if _render_readme(version):
             print(f"  [i] README.md updated.")
 
-    return {"downloaded": downloaded, "cached": cached, "failed": failed, "ok": ok}
+    return {"downloaded": downloaded, "cached": cached, "failed": failed, "ok": ok,
+            "overrides": overrides_included}
 
 
 # -------------------------
@@ -1394,20 +1450,13 @@ def update(
 # -------------------------
 
 
-def release(
-    version: str,
-    exclude: set[str] | None = None,
-    exclude_categories: set[str] | None = None,
-    suffix: str = "",
-    exclude_overrides: set[str] | None = None,
-) -> Path | None:
+def release(version: str, side: str = "client") -> Path | None:
     """
-    Build a distributable release zip for the given version.
+    Build a distributable release zip for the given side ('client' or 'server').
 
-    Calls update() to produce a clean build directory, applies any stored
-    overrides on top, then zips the result into releases/. Overrides are applied
-    after update() because update() clears BUILD first. exclude_overrides drops
-    specific override paths (client-only / server-only custom mods) from this build.
+    Calls update() to produce a complete build/ (mods plus the merged override tree),
+    zips that build into releases/, then refreshes the local gh-pages/ folder. The side
+    decides which mods and custom override mods are excluded (see _side_filters).
 
     Returns the Path to the created zip, or None if the build failed.
     """
@@ -1416,17 +1465,21 @@ def release(
         print(f"[ERROR] Version '{version}' not found in log.")
         return None
 
-    stats = update(version, exclude=exclude, exclude_categories=exclude_categories, suffix=suffix)
+    filters    = _side_filters(side)
+    other_side = "server" if side == "client" else "client"
+    if filters["exclude"]:
+        print(f"[INFO] Excluding {len(filters['exclude'])} {other_side}-only mod(s).")
+    if filters["exclude_overrides"]:
+        print(f"[INFO] Excluding {len(filters['exclude_overrides'])} {other_side}-only custom override mod(s).")
+
+    stats = update(version, exclude=filters["exclude"], exclude_categories=filters["exclude_categories"],
+                   suffix=side, exclude_overrides=filters["exclude_overrides"])
 
     if stats["failed"] != 0:
         print("[ERROR] Release aborted: not all mods could be fetched.")
         return None
 
-    overrides_included = apply_overrides(BUILD, commit_id, exclude_paths=exclude_overrides)
-    if overrides_included:
-        print("Overrides applied from repo.")
-    else:
-        print("[INFO] No stored overrides found — skipping.")
+    overrides_included = stats["overrides"]
 
     if not any(BUILD.rglob("*")):
         print("[ERROR] Release aborted: build folder is empty.")
@@ -1434,7 +1487,7 @@ def release(
 
     RELEASES.mkdir(parents=True, exist_ok=True)
     prefix      = get_file_prefix()
-    zip_name    = f"{prefix}-{version}-{suffix}.zip" if suffix else f"{prefix}-{version}.zip"
+    zip_name    = f"{prefix}-{version}-{side}.zip"
     zip_path    = RELEASES / zip_name
 
     print(f"\nBuilding release zip at {zip_path}...")
@@ -1445,10 +1498,9 @@ def release(
                 zf.write(file_path, file_path.relative_to(BUILD))
 
     snapshot       = load_snapshot(commit_id)
-    excluded_count = len(exclude) if exclude else 0
-    label          = f"v{version}-{suffix}" if suffix else f"v{version}"
+    excluded_count = len(filters["exclude"])
     print(f"\n{'=' * 36}")
-    print(f" RELEASE REPORT — {label}")
+    print(f" RELEASE REPORT — v{version}-{side}")
     print(f"{'=' * 36}")
     print(f"  Mods in snapshot : {len(snapshot)}")
     print(f"  Excluded         : {excluded_count}")
@@ -1460,23 +1512,17 @@ def release(
     print(f"{'=' * 36}\n")
     print(f"[OK] Built {zip_name}")
 
+    # Refresh the local gh-pages/ folder so versions.json, snapshots, and per-commit
+    # override data reflect this version (publish() pushes this folder to the branch).
     build_pages(show_hint=False)
 
     return zip_path
 
 
 def release_client(version: str) -> Path | None:
-    """Build a client release zip, bake and compile the client updater, and export a CurseForge zip, excluding server_only mods and server-only custom override mods."""
+    """Build the client release zip and CurseForge export zip, then bake the client updater (.py + .exe)."""
     print(f"Building client release for v{version}...")
-    excluded = get_filter_list("server_only")
-    if not excluded:
-        print("[WARN] No server_only list found in config — building full release.")
-    else:
-        print(f"[INFO] Excluding {len(excluded)} server-only mod(s).")
-    excluded_overrides = get_side_only_overrides("server")
-    if excluded_overrides:
-        print(f"[INFO] Excluding {len(excluded_overrides)} server-only custom override mod(s).")
-    zip_path = release(version, exclude=excluded, suffix="client", exclude_overrides=excluded_overrides)
+    zip_path = release(version, side="client")
     if zip_path:
         if bake_client_updater():
             _build_exe(_baked_client_updater_path())
@@ -1485,16 +1531,9 @@ def release_client(version: str) -> Path | None:
 
 
 def release_server(version: str) -> Path | None:
-    """Build a server release zip and bake the server updater, excluding client_only mods, client-only custom override mods, shaderpacks, and resourcepacks."""
-    excluded = get_filter_list("client_only")
-    if not excluded:
-        print("[WARN] No client_only list found in config — building full release.")
-    else:
-        print(f"[INFO] Excluding {len(excluded)} client-only mod(s).")
-    excluded_overrides = get_side_only_overrides("client")
-    if excluded_overrides:
-        print(f"[INFO] Excluding {len(excluded_overrides)} client-only custom override mod(s).")
-    zip_path = release(version, exclude=excluded, exclude_categories={"shaderpacks", "resourcepacks"}, suffix="server", exclude_overrides=excluded_overrides)
+    """Build the server release zip, then bake the server updater (.py)."""
+    print(f"Building server release for v{version}...")
+    zip_path = release(version, side="server")
     if zip_path:
         bake_server_updater()
     return zip_path
@@ -1676,16 +1715,12 @@ def _get_notes_file_for_release(version: str, message: str = "", side: str = "")
     side='client' excludes server_only mods; side='server' excludes client_only mods and
     non-mod categories. The caller is responsible for deleting this file after use.
     """
-    release_exclude: set[str] | None = None
-    release_exclude_categories: set[str] | None = None
-    release_exclude_overrides: set[str] | None = None
-    if side == "client":
-        release_exclude = get_filter_list("server_only")
-        release_exclude_overrides = get_side_only_overrides("server")
-    elif side == "server":
-        release_exclude = get_filter_list("client_only")
-        release_exclude_categories = {"shaderpacks", "resourcepacks"}
-        release_exclude_overrides = get_side_only_overrides("client")
+    filters = _side_filters(side) if side in ("client", "server") else {
+        "exclude": None, "exclude_categories": None, "exclude_overrides": None,
+    }
+    release_exclude            = filters["exclude"]
+    release_exclude_categories = filters["exclude_categories"]
+    release_exclude_overrides  = filters["exclude_overrides"]
 
     log          = load_log()
     prev_version = None
@@ -1783,92 +1818,89 @@ def _write_pages_assets(dest: Path) -> None:
                     zf.write(blob, rel_posix)
 
 
+_GH_PAGES_WORKTREE = Path(".gh-pages-worktree")
+_GH_PAGES_TMP_BRANCH = "gh-pages-temp"
+
+
+def _copy_pages_into(dest_dir: Path) -> list[str]:
+    """
+    Copy the built gh-pages assets from PAGES_OUTPUT into dest_dir and return the
+    top-level paths to stage with 'git add'. Only versions.json is required; the
+    snapshots/ and overrides/ trees are included when present.
+    """
+    shutil.copy2(PAGES_OUTPUT / "versions.json", dest_dir / "versions.json")
+    add_paths = ["versions.json"]
+    for name in ("snapshots", "overrides"):
+        src = PAGES_OUTPUT / name
+        if src.exists():
+            shutil.copytree(src, dest_dir / name, dirs_exist_ok=True)
+            add_paths.append(name)
+    return add_paths
+
+
+def _cleanup_pages_worktree() -> None:
+    """Remove the temporary gh-pages worktree and temp branch, ignoring errors."""
+    _run(["git", "worktree", "remove", "--force", str(_GH_PAGES_WORKTREE)], capture_output=True)
+    if _GH_PAGES_WORKTREE.exists():
+        shutil.rmtree(_GH_PAGES_WORKTREE, ignore_errors=True)
+    _run(["git", "branch", "-D", _GH_PAGES_TMP_BRANCH], capture_output=True)
+    _run(["git", "worktree", "prune"], capture_output=True)
+
+
 def _push_pages_assets() -> None:
     """
-    Push versions.json and snapshots to the gh-pages branch, creating
-    the branch as an orphan if it does not yet exist. Uses a temporary git
-    worktree to avoid switching the working branch.
+    Push the local gh-pages/ folder (versions.json, snapshots, and per-commit override
+    data) to the gh-pages branch, creating it as an orphan if it does not yet exist.
+
+    All git work happens in a throwaway worktree, so the main checkout's branch and
+    files are never touched — including on first-time branch creation. The caller is
+    responsible for building gh-pages/ first (release() or build_pages() does this).
     """
-    build_pages(show_hint=False)
     print("Pushing versions.json + snapshots to gh-pages...")
     try:
-        ls_result     = _run(
+        ls_result = _run(
             ["git", "ls-remote", "--heads", "origin", "gh-pages"],
             capture_output=True, text=True, check=True,
         )
         branch_exists = "gh-pages" in ls_result.stdout
 
-        if not branch_exists:
-            print("[INFO] Creating gh-pages branch...")
-            _run(["git", "checkout", "--orphan", "gh-pages"], check=True)
-            _run(["git", "rm", "-rf", "--cached", "."], check=True, capture_output=True)
-            shutil.copy2(PAGES_OUTPUT / "versions.json", "versions.json")
-            if (PAGES_OUTPUT / "snapshots").exists():
-                shutil.copytree(PAGES_OUTPUT / "snapshots", "snapshots", dirs_exist_ok=True)
-            if (PAGES_OUTPUT / "overrides").exists():
-                shutil.copytree(PAGES_OUTPUT / "overrides", "overrides", dirs_exist_ok=True)
-            git_add_args = ["git", "add", "versions.json", "snapshots"]
-            if Path("overrides").exists():
-                git_add_args.append("overrides")
-            _run(git_add_args, check=True)
-            _run(["git", "commit", "-m", "init: versions.json + snapshots"], check=True)
-            _run(["git", "push", "-u", "origin", "gh-pages"], check=True)
-            _run(["git", "checkout", "-"], check=True)
-        else:
-            _run(["git", "worktree", "prune"], capture_output=True)
+        # Clear any worktree/branch left behind by a previous failed run.
+        _cleanup_pages_worktree()
 
-            worktree_path = Path(".gh-pages-worktree")
-            if worktree_path.exists():
-                try:
-                    _run(
-                        ["git", "worktree", "remove", "--force", str(worktree_path)],
-                        capture_output=True,
-                    )
-                except Exception:
-                    pass
-                if worktree_path.exists():
-                    shutil.rmtree(worktree_path, ignore_errors=True)
-
-            # Clean up any leftover temp branch from a previous failed run
-            _run(["git", "branch", "-D", "gh-pages-temp"], capture_output=True)
+        if branch_exists:
             _run(["git", "fetch", "origin", "gh-pages"], check=True)
             _run(
-                ["git", "worktree", "add", "-b", "gh-pages-temp",
-                 str(worktree_path), "origin/gh-pages"],
+                ["git", "worktree", "add", "-b", _GH_PAGES_TMP_BRANCH,
+                 str(_GH_PAGES_WORKTREE), "origin/gh-pages"],
                 check=True, capture_output=True,
             )
+        else:
+            print("[INFO] Creating gh-pages branch...")
+            # Detached worktree at the current HEAD, then re-point it to a fresh orphan
+            # branch and clear the inherited files — all inside the worktree, so the main
+            # checkout is untouched and the gh-pages history starts clean.
+            _run(["git", "worktree", "add", "--detach", str(_GH_PAGES_WORKTREE)],
+                 check=True, capture_output=True)
+            _run(["git", "checkout", "--orphan", _GH_PAGES_TMP_BRANCH],
+                 check=True, capture_output=True, cwd=_GH_PAGES_WORKTREE)
+            _run(["git", "rm", "-rf", "--quiet", "--ignore-unmatch", "."],
+                 capture_output=True, cwd=_GH_PAGES_WORKTREE)
 
-            shutil.copy2(PAGES_OUTPUT / "versions.json", worktree_path / "versions.json")
-            if (PAGES_OUTPUT / "snapshots").exists():
-                shutil.copytree(PAGES_OUTPUT / "snapshots", worktree_path / "snapshots", dirs_exist_ok=True)
-            if (PAGES_OUTPUT / "overrides").exists():
-                shutil.copytree(PAGES_OUTPUT / "overrides", worktree_path / "overrides", dirs_exist_ok=True)
-            wt_git_add = ["git", "add", "versions.json", "snapshots"]
-            if (worktree_path / "overrides").exists():
-                wt_git_add.append("overrides")
-            _run(wt_git_add, check=True, cwd=worktree_path)
+        add_paths = _copy_pages_into(_GH_PAGES_WORKTREE)
+        _run(["git", "add", *add_paths], check=True, cwd=_GH_PAGES_WORKTREE)
 
-            try:
-                _run(
-                    ["git", "commit", "-m", "chore: update versions.json + snapshots"],
-                    check=True, capture_output=True, text=True, cwd=worktree_path,
-                )
-                _run(
-                    ["git", "push", "origin", "HEAD:gh-pages"],
-                    check=True, cwd=worktree_path,
-                )
-                print("[INFO] versions.json + snapshots updated on gh-pages.")
-            except subprocess.CalledProcessError as exc:
-                if "nothing to commit" in (exc.stdout or "") or "nothing to commit" in (exc.stderr or ""):
-                    print("[INFO] versions.json + snapshots are already up to date.")
-                else:
-                    raise
+        commit_msg = ("init: versions.json + snapshots" if not branch_exists
+                      else "chore: update versions.json + snapshots")
+        try:
+            _run(["git", "commit", "-m", commit_msg],
+                 check=True, capture_output=True, text=True, cwd=_GH_PAGES_WORKTREE)
+        except subprocess.CalledProcessError as exc:
+            if "nothing to commit" in (exc.stdout or "") or "nothing to commit" in (exc.stderr or ""):
+                print("[INFO] versions.json + snapshots are already up to date.")
+                return
+            raise
 
-            _run(
-                ["git", "worktree", "remove", "--force", str(worktree_path)], check=True
-            )
-            _run(["git", "branch", "-D", "gh-pages-temp"], capture_output=True)
-
+        _run(["git", "push", "origin", "HEAD:gh-pages"], check=True, cwd=_GH_PAGES_WORKTREE)
         print("[OK] versions.json + snapshots pushed to gh-pages.")
     except subprocess.CalledProcessError as exc:
         print(f"[ERROR] Git operation failed: {exc}")
@@ -1876,6 +1908,8 @@ def _push_pages_assets() -> None:
             print(f"Details: {exc.stderr.strip()}")
         print("       Make sure git is installed and you have push access to the repo.")
         raise
+    finally:
+        _cleanup_pages_worktree()
 
 
 def _has_client_changes(version: str) -> bool:
@@ -1924,7 +1958,22 @@ def _has_client_changes(version: str) -> bool:
         apply_client_filter(load_snapshot(old_commit_id)),
         apply_client_filter(load_snapshot(new_commit_id)),
     )
-    return bool(changes["added"] or changes["removed"] or changes["updated"])
+    if changes["added"] or changes["removed"] or changes["updated"]:
+        return True
+
+    # Client-visible override changes (custom mods, configs, etc.), ignoring
+    # overrides that are flagged server-only.
+    server_only_overrides = get_side_only_overrides("server")
+
+    def client_overrides(commit_id: str) -> dict:
+        return {
+            path: digest
+            for path, digest in load_override_manifest(commit_id).items()
+            if path not in server_only_overrides
+        }
+
+    override_changes = diff_overrides(client_overrides(old_commit_id), client_overrides(new_commit_id))
+    return bool(override_changes["added"] or override_changes["removed"] or override_changes["updated"])
 
 
 def _prepare_icon() -> Path | None:
@@ -2156,50 +2205,21 @@ def _push_working_dir(version: str) -> bool:
         return False
 
 
-def publish(version: str, message: str = "") -> None:
+def _create_github_release(version: str, message: str, user: str, repo: str) -> bool:
     """
-    Build a fresh client release zip and CurseForge export zip, create a GitHub Release
-    with the generated changelog as release notes, push updated versions.json to gh-pages,
-    and push README.md + .gitignore changes to the working directory's git repo.
-    An optional message is included at the top of the release notes.
-    Aborts if the version has no client-visible changes (e.g. only server-only mods changed).
+    Create the GitHub Release for an already-built client release: upload the client zip,
+    CurseForge zip, baked updater .py and .exe, with the client changelog as release notes.
+    Returns True on success.
     """
-    if not REPO.exists():
-        print("[ERROR] Repository not initialized. Run 'init' first.")
-        sys.exit(1)
-
-    user, repo = get_github_info()
-
-    log_entry = get_log_entry(version)
-    if not log_entry:
-        print(f"[ERROR] Version '{version}' not found in log.")
-        sys.exit(1)
-
-    if not _has_client_changes(version):
-        print(f"[ERROR] v{version} has no client-visible changes — nothing to publish.")
-        print("        All changes in this version are server-only mods.")
-        print("        Use 'release --server' if you need a server-side release.")
-        sys.exit(1)
-
-    if not message:
-        message = log_entry.get("message", "")
-    elif message != log_entry.get("message", ""):
-        set_version_message(version, message)
-
-    zip_path = release_client(version)
-    if not zip_path or not zip_path.exists():
-        print("[ERROR] Release build failed — cannot publish.")
-        sys.exit(1)
-
-    notes_path = _get_notes_file_for_release(version, message=message, side="client")
     tag        = f"v{version}"
+    notes_path = _get_notes_file_for_release(version, message=message, side="client")
 
     baked_updater_path = _baked_client_updater_path()
     baked_exe_path     = baked_updater_path.with_suffix(".exe")
+    cf_zip_path        = RELEASES / f"{get_file_prefix()}-{version}-curseforge.zip"
+    client_zip_path    = RELEASES / f"{get_file_prefix()}-{version}-client.zip"
 
-    cf_zip_path = RELEASES / f"{get_file_prefix()}-{version}-curseforge.zip"
-
-    release_assets = [str(zip_path)]
+    release_assets = [str(client_zip_path)]
     if cf_zip_path.exists():
         release_assets.append(str(cf_zip_path))
     else:
@@ -2212,7 +2232,6 @@ def publish(version: str, message: str = "") -> None:
         release_assets.append(str(baked_exe_path))
 
     print(f"Creating GitHub Release {tag}...")
-    release_ok = False
     try:
         _run(
             [
@@ -2225,13 +2244,60 @@ def publish(version: str, message: str = "") -> None:
             check=True,
         )
         print(f"[OK] GitHub Release {tag} created.")
-        release_ok = True
+        return True
     except subprocess.CalledProcessError:
         print("[ERROR] 'gh release create' failed.")
         print("        Make sure the GitHub CLI is installed: https://cli.github.com")
         print("        And that you're authenticated: gh auth login")
+        return False
     finally:
         notes_path.unlink(missing_ok=True)
+
+
+def publish(version: str, message: str = "") -> None:
+    """
+    Publish a committed version.
+
+    With client-visible changes: build the client release (zip, CurseForge zip, baked
+    updater .py + .exe via release_client), create a GitHub Release with the client
+    changelog as notes, push the gh-pages branch, and push README/.gitignore.
+
+    With no client-visible changes (only server-side data moved): skip the GitHub
+    Release and just refresh the gh-pages branch so the server updater sees the new
+    version, then report a partial publish.
+    """
+    if not REPO.exists():
+        print("[ERROR] Repository not initialized. Run 'init' first.")
+        sys.exit(1)
+
+    user, repo = get_github_info()
+
+    log_entry = get_log_entry(version)
+    if not log_entry:
+        print(f"[ERROR] Version '{version}' not found in log.")
+        sys.exit(1)
+
+    if not message:
+        message = log_entry.get("message", "")
+    elif message != log_entry.get("message", ""):
+        set_version_message(version, message)
+
+    has_client_changes = _has_client_changes(version)
+    release_ok = False
+    repo_ok    = True
+
+    if has_client_changes:
+        # release_client() builds the zips, bakes the updater, and refreshes gh-pages/.
+        zip_path = release_client(version)
+        if not zip_path or not zip_path.exists():
+            print("[ERROR] Release build failed — cannot publish.")
+            sys.exit(1)
+        release_ok = _create_github_release(version, message, user, repo)
+        repo_ok    = _push_working_dir(version)
+    else:
+        print(f"[INFO] v{version} has no client-visible changes (server-side only).")
+        print("       Skipping the GitHub Release; refreshing gh-pages so the server updater sees it.")
+        build_pages(show_hint=False)  # release_client didn't run, so build gh-pages/ here
 
     pages_ok = True
     try:
@@ -2242,14 +2308,15 @@ def publish(version: str, message: str = "") -> None:
         print("       Run 'python modpackctl.py build-pages' to generate the files locally,")
         print("       then push them to the gh-pages branch manually.")
 
-    repo_ok = _push_working_dir(version)
-
     pages_url   = f"https://{user}.github.io/{repo}/"
-    release_url = f"https://github.com/{user}/{repo}/releases/tag/{tag}"
+    release_url = f"https://github.com/{user}/{repo}/releases/tag/v{version}"
+    file_prefix = get_file_prefix()
 
     print(f"\n{'=' * 42}")
-    if release_ok and pages_ok and repo_ok:
+    if has_client_changes and release_ok and pages_ok and repo_ok:
         print(f" PUBLISH COMPLETE — v{version}")
+    elif not has_client_changes and pages_ok:
+        print(f" PUBLISH PARTIAL — v{version} (gh-pages only, no client release)")
     else:
         print(f" PUBLISH PARTIAL — v{version} (see errors above)")
     print(f"{'=' * 42}")
@@ -2257,9 +2324,12 @@ def publish(version: str, message: str = "") -> None:
         print(f"  Release URL : {release_url}")
     print(f"  gh-pages    : {pages_url}")
     print(f"{'=' * 42}\n")
-    file_prefix = get_file_prefix()
-    print(f"  New players    : download {file_prefix}-{version}-client.zip (or -curseforge.zip) from the release page.")
-    print(f"  Existing players: run {file_prefix}-client-updater.py (or .exe) from their current install.")
+    if has_client_changes:
+        print(f"  New players    : download {file_prefix}-{version}-client.zip (or -curseforge.zip) from the release page.")
+        print(f"  Existing players: run {file_prefix}-client-updater.py (or .exe) from their current install.")
+    else:
+        print("  No client release was created — only server-side data changed.")
+        print(f"  Server admins  : run {file_prefix}-server-updater.py to pull v{version}.")
 
 
 def build_pages(show_hint: bool = True) -> None:
@@ -2638,7 +2708,9 @@ if __name__ == "__main__":
     # commit
     parser_commit = subparsers.add_parser("commit", help="Record a new version from an updated export")
     parser_commit.add_argument("zip", help="Path to the CurseForge export zip")
-    parser_commit.add_argument("--major", action="store_true", help="Force a major version bump")
+    commit_version_group = parser_commit.add_mutually_exclusive_group()
+    commit_version_group.add_argument("--major", action="store_true", help="Force a major version bump")
+    commit_version_group.add_argument("--version", metavar="X.Y.Z", default=None, help="Set an explicit version (clean x.y.z, greater than the latest) instead of auto-bumping")
     parser_commit.add_argument("--message", metavar="MESSAGE", default="", help="Release note shown to players in the updater changelog")
 
     # log
@@ -2718,7 +2790,7 @@ if __name__ == "__main__":
         init(args.zip, args.force)
 
     elif args.command == "commit":
-        commit(args.zip, args.major, message=args.message)
+        commit(args.zip, args.major, message=args.message, version_override=args.version)
 
     elif args.command == "log":
         show_log()
@@ -2813,12 +2885,10 @@ if __name__ == "__main__":
                 print("[ERROR] No committed versions found.")
                 sys.exit(1)
             version = log[-1]["version"]
-        if args.server:
-            excluded = get_filter_list("client_only")
-            update(version, exclude=excluded, exclude_categories={"shaderpacks", "resourcepacks"}, suffix="server")
-        else:
-            excluded = get_filter_list("server_only")
-            update(version, exclude=excluded, suffix="client")
+        side    = "server" if args.server else "client"
+        filters = _side_filters(side)
+        update(version, exclude=filters["exclude"], exclude_categories=filters["exclude_categories"],
+               suffix=side, exclude_overrides=filters["exclude_overrides"])
 
     elif args.command == "purge":
         purge_cache(args.all)

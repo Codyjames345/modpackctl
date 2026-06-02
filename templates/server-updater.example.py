@@ -371,40 +371,40 @@ _BCC_TEMPLATE = """\
 """
 
 
-def _bcc_version(version: str) -> str:
-    """Return the full modpackVersion string as stored in bcc-common.toml."""
-    return f"{MODPACK_NAME} - {version}"
-
-
 def _bare_version(version: str | None) -> str:
-    """Extract version number from 'MODPACK_NAME - VERSION' format, or '?' if absent/malformed."""
+    """
+    Normalise a stored modpackVersion to a bare 'x.y.z' string, or '?' if absent/malformed.
+    modpackName is a separate bcc field, so modpackVersion holds only the number. The legacy
+    'MODPACK_NAME - x.y.z' format (and a stray leading 'v') is still accepted for old installs.
+    """
     if not version:
         return "?"
     prefix = f"{MODPACK_NAME} - "
     if version.startswith(prefix):
-        return version[len(prefix):]
-    return "?"
+        version = version[len(prefix):]
+    version = version.strip().lstrip("vV").strip()
+    return version if re.fullmatch(r"\d+(\.\d+)*", version) else "?"
 
 
 def _display_version(version: str | None) -> str:
-    """Format a version for display: 'v1.2.0', or '?' (no prefix) if absent/malformed."""
+    """Format a version for display: 'v1.2.0', or '?' if absent/malformed."""
     bare = _bare_version(version)
     return "?" if bare == "?" else f"v{bare}"
 
 
 def write_installed_version(server_dir: Path, version: str) -> None:
-    """Write modpackVersion (and modpackName) into config/bcc-common.toml."""
+    """Write modpackVersion (bare 'x.y.z') and modpackName into config/bcc-common.toml."""
     bcc_path = server_dir / _BCC_CONFIG_PATH
-    full_version = _bcc_version(version)
+    bare = str(version)
     if not bcc_path.exists():
         bcc_path.parent.mkdir(parents=True, exist_ok=True)
         bcc_path.write_text(
-            _BCC_TEMPLATE.format(name=MODPACK_NAME, version=full_version),
+            _BCC_TEMPLATE.format(name=MODPACK_NAME, version=bare),
             encoding="utf-8",
         )
         return
     text = bcc_path.read_text(encoding="utf-8")
-    text = _BCC_VERSION_RE.sub(rf'\g<1>"{full_version}"', text)
+    text = _BCC_VERSION_RE.sub(rf'\g<1>"{bare}"', text)
     text = _BCC_NAME_RE.sub(   rf'\g<1>"{MODPACK_NAME}"', text)
     bcc_path.write_text(text, encoding="utf-8")
 
@@ -715,7 +715,7 @@ def main() -> None:
         if fresh_wipe_dirs:
             print(f"[WARN] The following folders will be cleared: {folder_list}")
 
-    if installed_version == _bcc_version(target_version) and not fresh:
+    if _bare_version(installed_version) == str(target_version) and not fresh:
         print(f"\n[OK] Already on version {target_version} — nothing to do.")
         sys.exit(0)
 
@@ -733,7 +733,7 @@ def main() -> None:
         old_snapshot: dict = {}
     else:
         installed_entry = next(
-            (entry for entry in available_versions if _bcc_version(str(entry["version"])) == str(installed_version)),
+            (entry for entry in available_versions if str(entry["version"]) == _bare_version(installed_version)),
             None,
         )
         if installed_entry is None:

@@ -148,40 +148,40 @@ _BCC_TEMPLATE = """\
 """
 
 
-def _bcc_version(version: str) -> str:
-    """Return the full modpackVersion string as stored in bcc-common.toml."""
-    return f"{MODPACK_NAME} - {version}"
-
-
 def _bare_version(version: str | None) -> str:
-    """Extract version number from 'MODPACK_NAME - VERSION' format, or '?' if absent/malformed."""
+    """
+    Normalise a stored modpackVersion to a bare 'x.y.z' string, or '?' if absent/malformed.
+    modpackName is a separate bcc field, so modpackVersion holds only the number. The legacy
+    'MODPACK_NAME - x.y.z' format (and a stray leading 'v') is still accepted for old installs.
+    """
     if not version:
         return "?"
     prefix = f"{MODPACK_NAME} - "
     if version.startswith(prefix):
-        return version[len(prefix):]
-    return "?"
+        version = version[len(prefix):]
+    version = version.strip().lstrip("vV").strip()
+    return version if re.fullmatch(r"\d+(\.\d+)*", version) else "?"
 
 
 def _display_version(version: str | None) -> str:
-    """Format a version for display: 'v1.2.0', or '?' (no prefix) if absent/malformed."""
+    """Format a version for display: 'v1.2.0', or '?' if absent/malformed."""
     bare = _bare_version(version)
     return "?" if bare == "?" else f"v{bare}"
 
 
 def write_installed_version(modpack_dir: Path, version: str) -> None:
-    """Write modpackVersion (and modpackName) into config/bcc-common.toml."""
+    """Write modpackVersion (bare 'x.y.z') and modpackName into config/bcc-common.toml."""
     bcc_path = modpack_dir / _BCC_CONFIG_PATH
-    full_version = _bcc_version(version)
+    bare = str(version)
     if not bcc_path.exists():
         bcc_path.parent.mkdir(parents=True, exist_ok=True)
         bcc_path.write_text(
-            _BCC_TEMPLATE.format(name=MODPACK_NAME, version=full_version),
+            _BCC_TEMPLATE.format(name=MODPACK_NAME, version=bare),
             encoding="utf-8",
         )
         return
     text = bcc_path.read_text(encoding="utf-8")
-    text = _BCC_VERSION_RE.sub(rf'\g<1>"{full_version}"', text)
+    text = _BCC_VERSION_RE.sub(rf'\g<1>"{bare}"', text)
     text = _BCC_NAME_RE.sub(   rf'\g<1>"{MODPACK_NAME}"', text)
     bcc_path.write_text(text, encoding="utf-8")
 
@@ -1309,7 +1309,7 @@ class UpdaterApp(tk.Tk):
                 ))
                 return
 
-            if self.local_version == _bcc_version(self.latest_version or ""):
+            if _bare_version(self.local_version) == str(self.latest_version or ""):
                 self.after(0, self._show_up_to_date)
                 return
 
@@ -1530,7 +1530,7 @@ class UpdaterApp(tk.Tk):
                     self.release_message  = entry.get("message", "")
                     self.target_modloader = entry.get("modloader", "")
                 if (not self.fresh_install
-                        and self.local_version == _bcc_version(version_str)):
+                        and _bare_version(self.local_version) == str(version_str)):
                     old_commit = entry["commit"]
 
             if not target_commit:
@@ -2148,7 +2148,7 @@ class UpdaterApp(tk.Tk):
             return
         tk.Label(
             parent,
-            text=f"bcc-common.toml → {_bcc_version(self.target_version)}",
+            text=f"bcc-common.toml → {self.target_version}",
             font=FONT_MONO, bg=DARK_BG, fg=GREEN, anchor="center",
         ).pack(side="left", fill="x", expand=True)
 
