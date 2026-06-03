@@ -55,6 +55,7 @@ PAGES_OUTPUT     = Path("gh-pages")
 CONFIG_EXAMPLE   = Path("modpackctl.example.toml")
 CLIENT_UPDATE_SCRIPT = Path("client-updater.py")   # working copy; customise for this modpack
 SERVER_UPDATE_SCRIPT = Path("server-updater.py")   # working copy; customise for this modpack
+UPDATER_COMMON       = Path("updater_common.py")   # shared helpers, inlined into both updaters at bake time
 _DANCE_DEFAULT_URL  = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
 
 def _baked_client_updater_path() -> Path:
@@ -2333,16 +2334,28 @@ def build_pages(show_hint: bool = True) -> None:
         print("     Push the contents of this folder to your gh-pages branch.")
 
 
+def _example_name_for(target: Path) -> str:
+    """
+    Return the bundled template filename for a working-copy target. Most targets follow
+    the `name.example.ext` convention; the shared updater_common.py is shipped verbatim
+    (no `.example`) so its `from updater_common import *` import resolves in templates/.
+    """
+    if target == UPDATER_COMMON:
+        return target.name
+    return f"{target.stem}.example{target.suffix}"
+
+
 def _ensure_files(*targets: Path) -> None:
     """
-    For each target, copy the bundled name.example.ext to the CWD as name.ext if the
-    working copy does not already exist. Works for updater scripts and the toml config.
+    For each target, copy its bundled template to the CWD if the working copy does not
+    already exist. Works for the updater scripts, the shared updater_common.py, and the
+    toml config.
     """
     for target in targets:
         if target.exists():
             print(f"[INFO] Using existing {target.name}")
         else:
-            example_name = f"{target.stem}.example{target.suffix}"
+            example_name = _example_name_for(target)
             source = _ensure_example(example_name)
             if source is None:
                 print(f"[ERROR] Could not obtain {example_name} — skipping {target.name}.")
@@ -2351,15 +2364,18 @@ def _ensure_files(*targets: Path) -> None:
             print(f"[INFO] Copied {example_name} → {target.name} — you can customise it for this modpack.")
 
 
-def reset_file(client: bool = False, server: bool = False, config: bool = False, all_files: bool = False) -> None:
+def reset_file(client: bool = False, server: bool = False, config: bool = False,
+               common: bool = False, all_files: bool = False) -> None:
     if all_files:
-        client = server = config = True
+        client = server = config = common = True
 
     tasks: list[tuple[Path, str, bool]] = []
     if client:
-        tasks.append((CLIENT_UPDATE_SCRIPT, f"{CLIENT_UPDATE_SCRIPT.stem}.example{CLIENT_UPDATE_SCRIPT.suffix}", False))
+        tasks.append((CLIENT_UPDATE_SCRIPT, _example_name_for(CLIENT_UPDATE_SCRIPT), False))
     if server:
-        tasks.append((SERVER_UPDATE_SCRIPT, f"{SERVER_UPDATE_SCRIPT.stem}.example{SERVER_UPDATE_SCRIPT.suffix}", False))
+        tasks.append((SERVER_UPDATE_SCRIPT, _example_name_for(SERVER_UPDATE_SCRIPT), False))
+    if common:
+        tasks.append((UPDATER_COMMON, _example_name_for(UPDATER_COMMON), False))
     if config:
         tasks.append((CONFIG_FILE, CONFIG_EXAMPLE.name, True))
 
@@ -2456,10 +2472,33 @@ def _validate_rainbow_bpm(settings: dict) -> float:
     return float(value)
 
 
+_INLINE_MARKER_RE = re.compile(r'^from updater_common import \*.*$', re.MULTILINE)
+
+
+def _inline_common(specific_src: str) -> str:
+    """
+    Inline the working updater_common.py into an updater script by replacing its
+    `from updater_common import *` line with the shared module's body, so the baked
+    output is one self-contained file. The shared module's leading docstring and its
+    `from __future__` import are stripped — the host script already provides
+    `from __future__ import annotations` as its first statement.
+    """
+    common_src = UPDATER_COMMON.read_text(encoding="utf-8")
+    common_src = re.sub(r'\A\s*""".*?"""\s*', "", common_src, count=1, flags=re.DOTALL)
+    common_src = re.sub(r'^from __future__ import annotations[^\n]*\n', "", common_src,
+                        count=1, flags=re.MULTILINE)
+    common_body = common_src.strip("\n")
+    if not _INLINE_MARKER_RE.search(specific_src):
+        return specific_src  # no marker (e.g. a legacy single-file template) — leave as-is
+    # Function replacement avoids backslash interpretation of the common body.
+    return _INLINE_MARKER_RE.sub(lambda _match: common_body, specific_src, count=1)
+
+
 def bake_client_updater() -> bool:
     """
-    Substitute config placeholders in client-updater.example.py and write the result to
-    releases/{file_prefix}-updater.py. Returns False if client-updater.example.py is not present.
+    Inline updater_common.py and substitute config placeholders in client-updater.py,
+    writing the result to releases/{file_prefix}-client-updater.py. Returns False if the
+    template is not present.
 
     Supported placeholders (written as bare Python string literals in client-updater.example.py):
       __GITHUB_USER__          — GitHub username from modpackctl.toml
@@ -2474,9 +2513,12 @@ def bake_client_updater() -> bool:
       __COLOUR_DEFAULTS_JSON__ — JSON dict of the 11 theme colours, validated against
                                  [settings.colours] in modpackctl.toml
     """
-    _ensure_files(CLIENT_UPDATE_SCRIPT)
+    _ensure_files(UPDATER_COMMON, CLIENT_UPDATE_SCRIPT)
     if not CLIENT_UPDATE_SCRIPT.exists():
         print(f"[WARN] {CLIENT_UPDATE_SCRIPT} not found — skipping updater bake.")
+        return False
+    if not UPDATER_COMMON.exists():
+        print(f"[WARN] {UPDATER_COMMON} not found — skipping updater bake.")
         return False
     user, repo        = get_github_info()
     cfg               = load_config()
@@ -2489,7 +2531,7 @@ def bake_client_updater() -> bool:
     rainbow_bpm       = _validate_rainbow_bpm(settings)
     beat_drop         = _validate_beat_drop(settings)
     colour_json       = _validate_and_serialize_colours(settings)
-    content = CLIENT_UPDATE_SCRIPT.read_text(encoding="utf-8")
+    content = _inline_common(CLIENT_UPDATE_SCRIPT.read_text(encoding="utf-8"))
     content = content.replace('"__GITHUB_USER__"',          f'"{user}"')
     content = content.replace('"__GITHUB_REPO__"',          f'"{repo}"')
     content = content.replace('"__MODPACK_NAME__"',         f'"{modpack_name}"')
@@ -2517,14 +2559,17 @@ def bake_server_updater() -> bool:
       __GITHUB_REPO__  — GitHub repo name from modpackctl.toml
       __MODPACK_NAME__ — settings.modpack_name from modpackctl.toml
     """
-    _ensure_files(SERVER_UPDATE_SCRIPT)
+    _ensure_files(UPDATER_COMMON, SERVER_UPDATE_SCRIPT)
     if not SERVER_UPDATE_SCRIPT.exists():
         print(f"[WARN] {SERVER_UPDATE_SCRIPT} not found — skipping server updater bake.")
+        return False
+    if not UPDATER_COMMON.exists():
+        print(f"[WARN] {UPDATER_COMMON} not found — skipping server updater bake.")
         return False
     user, repo   = get_github_info()
     cfg          = load_config()
     modpack_name = cfg.get("settings", {}).get("modpack_name", "")
-    content = SERVER_UPDATE_SCRIPT.read_text(encoding="utf-8")
+    content = _inline_common(SERVER_UPDATE_SCRIPT.read_text(encoding="utf-8"))
     content = content.replace('"__GITHUB_USER__"',  f'"{user}"')
     content = content.replace('"__GITHUB_REPO__"',  f'"{repo}"')
     content = content.replace('"__MODPACK_NAME__"', f'"{modpack_name}"')
@@ -2767,8 +2812,9 @@ if __name__ == "__main__":
     parser_reset_file_group = parser_reset_tmpl.add_mutually_exclusive_group(required=True)
     parser_reset_file_group.add_argument("--client", action="store_true", help="Overwrite client-updater.py from the bundled example")
     parser_reset_file_group.add_argument("--server", action="store_true", help="Overwrite server-updater.py from the bundled example")
+    parser_reset_file_group.add_argument("--common", action="store_true", help="Overwrite updater_common.py (shared updater helpers) from the bundled copy")
     parser_reset_file_group.add_argument("--config", action="store_true", help="Overwrite modpackctl.toml with modpackctl.example.toml")
-    parser_reset_file_group.add_argument("--all", dest="all_files", action="store_true", help="Overwrite all three files")
+    parser_reset_file_group.add_argument("--all", dest="all_files", action="store_true", help="Overwrite all updater files and the config")
 
     # build-exe
     subparsers.add_parser("build-exe", help="Build releases/client-updater.exe from the baked client updater")
@@ -2931,5 +2977,6 @@ if __name__ == "__main__":
             sys.exit(1)
 
     elif args.command == "reset-file":
-        reset_file(client=args.client, server=args.server, config=args.config, all_files=args.all_files)
+        reset_file(client=args.client, server=args.server, config=args.config,
+                   common=args.common, all_files=args.all_files)
 

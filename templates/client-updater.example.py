@@ -45,34 +45,15 @@ except ImportError:
     _HAS_IMAGEIO = False
 
 # -------------------------
-# CONFIG  (baked in at release time by modpackctl)
+# CLIENT CONFIG  (logo + wipe categories; shared config lives in updater_common)
 # -------------------------
 
-GITHUB_USER  = "__GITHUB_USER__"
-GITHUB_REPO  = "__GITHUB_REPO__"
-MODPACK_NAME = "__MODPACK_NAME__"
-LOGO_URL     = "__LOGO_URL__"
-VERSIONS_URL  = f"https://{GITHUB_USER}.github.io/{GITHUB_REPO}/versions.json"
-SNAPSHOTS_URL = f"https://{GITHUB_USER}.github.io/{GITHUB_REPO}/snapshots"
-# Override files are version-controlled per commit. The content for a commit lives at
-# {OVERRIDES_URL}/{commit}.zip and its path->hash manifest at {SNAPSHOTS_URL}/{commit}.overrides.json.
-OVERRIDES_URL = f"https://{GITHUB_USER}.github.io/{GITHUB_REPO}/overrides"
+LOGO_URL = "__LOGO_URL__"
 
-if "__" in GITHUB_USER or "__" in GITHUB_REPO:
-    print(
-        "[ERROR] client-updater.py has not been configured.\n"
-        "Download a configured copy from the modpack's GitHub Releases page,\n"
-        "or run 'python modpackctl.py publish <version>' to produce one."
-    )
-    sys.exit(1)
+from updater_common import *  # noqa: F403  (inlined at bake time by modpackctl)
 
-# Optional fields: fall back gracefully if not baked
-if "__" in MODPACK_NAME:
-    MODPACK_NAME = GITHUB_REPO
 if "__" in LOGO_URL:
     LOGO_URL = ""
-
-HEADERS = {"User-Agent": f"{GITHUB_REPO}-updater/1.0"}
 
 # Top-level category folders the client wipes on a fresh install. Override folders
 # (config/, kubejs/, etc.) are added dynamically from the overrides zip at runtime.
@@ -80,111 +61,8 @@ CATEGORY_DIRS: list[str] = ["mods", "shaderpacks", "resourcepacks"]
 
 
 # -------------------------
-# PREFS  (remembers the modpack folder between runs)
+# FOLDER AUTODETECTION  (client-specific)
 # -------------------------
-
-def _prefs_dir() -> Path:
-    """Return the per-user prefs directory for the updater."""
-    return Path.home() / ".modpack-updater"
-
-
-def _prefs_path() -> Path:
-    """Return the prefs file path, namespaced per modpack."""
-    return _prefs_dir() / f"{GITHUB_USER}-{GITHUB_REPO}.json"
-
-
-def load_prefs() -> dict:
-    """Return saved prefs (last folder, etc.), or empty dict if missing/corrupt."""
-    path = _prefs_path()
-    if not path.exists():
-        return {}
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return {}
-
-
-def save_prefs(data: dict) -> None:
-    """Persist prefs to disk. Best-effort; failures are silently ignored."""
-    path = _prefs_path()
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    except OSError:
-        pass
-
-
-# -------------------------
-# FOLDER AUTODETECTION
-# -------------------------
-
-_BCC_CONFIG_PATH = Path("config") / "bcc-common.toml"
-_BCC_VERSION_RE  = re.compile(r'^([ \t]*modpackVersion\s*=\s*)"([^"]*)"', re.MULTILINE)
-_BCC_NAME_RE     = re.compile(r'^([ \t]*modpackName\s*=\s*)"([^"]*)"',    re.MULTILINE)
-
-
-def read_installed_version(modpack_dir: Path) -> str | None:
-    """Return the modpackVersion from config/bcc-common.toml, or None if absent/unset."""
-    bcc_path = modpack_dir / _BCC_CONFIG_PATH
-    if not bcc_path.exists():
-        return None
-    match = _BCC_VERSION_RE.search(bcc_path.read_text(encoding="utf-8"))
-    if not match:
-        return None
-    version = match.group(2)
-    return version if version and version != "CHANGE_ME" else None
-
-
-_BCC_TEMPLATE = """\
-#General settings
-[general]
-\t#The name of the modpack
-\tmodpackName = "{name}"
-\t#The version of the modpack
-\tmodpackVersion = "{version}"
-\t#Use the metadata.json to determine the modpack version
-\t#ONLY ENABLE THIS IF YOU KNOW WHAT YOU ARE DOING
-\tuseMetadata = false
-"""
-
-
-def _bare_version(version: str | None) -> str:
-    """
-    Normalise a stored modpackVersion to a bare 'x.y.z' string, or '?' if absent/malformed.
-    modpackName is a separate bcc field, so modpackVersion holds only the number. The legacy
-    'MODPACK_NAME - x.y.z' format (and a stray leading 'v') is still accepted for old installs.
-    """
-    if not version:
-        return "?"
-    prefix = f"{MODPACK_NAME} - "
-    if version.startswith(prefix):
-        version = version[len(prefix):]
-    version = version.strip().lstrip("vV").strip()
-    return version if re.fullmatch(r"\d+(\.\d+)*", version) else "?"
-
-
-def _display_version(version: str | None) -> str:
-    """Format a version for display: 'v1.2.0', or '?' if absent/malformed."""
-    bare = _bare_version(version)
-    return "?" if bare == "?" else f"v{bare}"
-
-
-def write_installed_version(modpack_dir: Path, version: str) -> None:
-    """Write modpackVersion (bare 'x.y.z') and modpackName into config/bcc-common.toml."""
-    bcc_path = modpack_dir / _BCC_CONFIG_PATH
-    bare = str(version)
-    if not bcc_path.exists():
-        bcc_path.parent.mkdir(parents=True, exist_ok=True)
-        bcc_path.write_text(
-            _BCC_TEMPLATE.format(name=MODPACK_NAME, version=bare),
-            encoding="utf-8",
-        )
-        return
-    text = bcc_path.read_text(encoding="utf-8")
-    text = _BCC_VERSION_RE.sub(rf'\g<1>"{bare}"', text)
-    text = _BCC_NAME_RE.sub(   rf'\g<1>"{MODPACK_NAME}"', text)
-    bcc_path.write_text(text, encoding="utf-8")
-
 
 def autodetect_minecraft_folder() -> Path | None:
     """Return a likely default Minecraft folder, or None if none exists."""
@@ -204,298 +82,7 @@ def is_likely_modpack_folder(folder: Path) -> bool:
     """Return True if folder looks like a Minecraft modpack root."""
     if not folder.is_dir():
         return False
-    return (folder / "mods").is_dir() or (folder / _BCC_CONFIG_PATH).exists()
-
-
-# -------------------------
-# NETWORK
-# -------------------------
-
-def fetch_json(url: str) -> dict:
-    """GET a URL and return its parsed JSON body."""
-    request = urllib.request.Request(url, headers=HEADERS)
-    with urllib.request.urlopen(request, timeout=15) as response:
-        return json.loads(response.read().decode("utf-8"))
-
-
-def fetch_versions() -> dict:
-    """Fetch versions.json from gh-pages."""
-    return fetch_json(VERSIONS_URL)
-
-
-def fetch_snapshot(commit_id: str) -> dict:
-    """Fetch a snapshot from gh-pages."""
-    return fetch_json(f"{SNAPSHOTS_URL}/{commit_id}.json")
-
-
-def fetch_override_manifest(commit_id: str) -> dict:
-    """
-    Fetch a commit's override manifest (path -> sha256 hex) from gh-pages.
-    Returns {} when the commit has no overrides or the manifest is unavailable
-    (e.g. a pack published before override versioning existed).
-    """
-    try:
-        return fetch_json(f"{SNAPSHOTS_URL}/{commit_id}.overrides.json")
-    except (urllib.error.URLError, OSError, TimeoutError, ValueError):
-        return {}
-
-
-def fetch_overrides_zip(commit_id: str) -> bytes | None:
-    """Download a commit's overrides zip from gh-pages. Returns bytes, or None if unavailable."""
-    try:
-        request = urllib.request.Request(f"{OVERRIDES_URL}/{commit_id}.zip", headers=HEADERS)
-        with urllib.request.urlopen(request, timeout=30) as resp:
-            return resp.read()
-    except urllib.error.HTTPError as exc:
-        if exc.code == 404:
-            return None
-        return None
-    except (urllib.error.URLError, OSError, TimeoutError):
-        return None
-
-
-# -------------------------
-# FILTERING
-# -------------------------
-
-def filter_for_client(snapshot: dict, server_only_ids: set[str]) -> dict:
-    """Return a copy of snapshot with server-only mods removed."""
-    if not server_only_ids:
-        return snapshot
-    return {
-        project_id: entry
-        for project_id, entry in snapshot.items()
-        if project_id not in server_only_ids
-    }
-
-
-# -------------------------
-# DIFF
-# -------------------------
-
-def diff_snapshots(old: dict, new: dict) -> dict:
-    """
-    Compute the difference between two enriched snapshots.
-    Returns dict with keys 'added', 'removed' (list of (pid, entry)) and
-    'updated' (list of (pid, old_entry, new_entry)).
-    """
-    added   = sorted(
-        ((project_id, new[project_id]) for project_id in new if project_id not in old),
-        key=lambda pair: pair[1]["name"].lower(),
-    )
-    removed = sorted(
-        ((project_id, old[project_id]) for project_id in old if project_id not in new),
-        key=lambda pair: pair[1]["name"].lower(),
-    )
-    updated_unsorted = [
-        (project_id, old[project_id], new[project_id])
-        for project_id in set(old) & set(new)
-        if old[project_id]["file_id"] != new[project_id]["file_id"]
-    ]
-    updated = sorted(updated_unsorted, key=lambda triple: triple[2]["name"].lower())
-    return {"added": added, "removed": removed, "updated": updated}
-
-
-# -------------------------
-# FILE CLASSIFICATION
-# -------------------------
-
-def classify_downloaded_file(path: Path) -> str:
-    """Inspect a file and return 'mods', 'shaderpacks', or 'resourcepacks'."""
-    if path.suffix.lower() != ".zip":
-        return "mods"
-    try:
-        with zipfile.ZipFile(path, "r") as zf:
-            member_names = zf.namelist()
-        if any(name == "shaders/" or name.startswith("shaders/") for name in member_names):
-            return "shaderpacks"
-        return "resourcepacks"
-    except zipfile.BadZipFile:
-        return "mods"
-
-
-def locate_existing_file(project_id: str, entry: dict, modpack_dir: Path) -> Path | None:
-    """
-    Find the on-disk file for a mod entry. Prefers an exact filename match
-    in the entry's expected category, then falls back to all category folders,
-    then to a substring match by project_id.
-    """
-    expected_category = entry.get("category", "mods")
-    expected_filename = entry.get("file", "")
-
-    if expected_filename:
-        exact = modpack_dir / expected_category / expected_filename
-        if exact.exists():
-            return exact
-        for category in ("mods", "shaderpacks", "resourcepacks"):
-            candidate = modpack_dir / category / expected_filename
-            if candidate.exists():
-                return candidate
-
-    for category in ("mods", "shaderpacks", "resourcepacks"):
-        category_dir = modpack_dir / category
-        if not category_dir.is_dir():
-            continue
-        for file_path in category_dir.iterdir():
-            if project_id in file_path.stem:
-                return file_path
-    return None
-
-
-# -------------------------
-# DOWNLOAD
-# -------------------------
-
-def download_mod_file(project_id: str, file_id: str, dest_dir: Path) -> Path | None:
-    """
-    Download a single CurseForge mod file into dest_dir.
-    Returns the local path on success, or None on failure.
-    """
-    url = f"https://www.curseforge.com/api/v1/mods/{project_id}/files/{file_id}/download"
-    request = urllib.request.Request(url, headers=HEADERS)
-
-    try:
-        with urllib.request.urlopen(request, timeout=60) as response:
-            final_url    = response.url
-            url_path     = urlparse(final_url).path
-            filename     = os.path.basename(unquote(url_path))
-            if not filename or "." not in filename:
-                content_type = response.headers.get("Content-Type", "")
-                extension    = ".zip" if "zip" in content_type else ".jar"
-                filename     = f"{project_id}-{file_id}{extension}"
-
-            local_path = dest_dir / filename
-            with open(local_path, "wb") as fh:
-                shutil.copyfileobj(response, fh)
-            return local_path
-    except (urllib.error.URLError, OSError, TimeoutError):
-        return None
-
-
-def extract_override_members(
-    install_dir: Path,
-    zip_bytes: bytes,
-    paths: list[str],
-    on_progress=None,
-    on_error=None,
-) -> list[str]:
-    """
-    Extract the given member paths from the override zip into install_dir, overwriting
-    any existing files. The caller (the version-aware override planner) decides which
-    paths to write, so this is unconditional — it never skips existing files.
-    on_progress, if given, is called as on_progress(current, total) after every member.
-    on_error, if given, is called as on_error(path, exception) for OSError failures and
-    extraction continues; if not given, OSError propagates and aborts the extraction.
-    Returns a list of relative paths that were written.
-    """
-    wanted = set(paths)
-    applied: list[str] = []
-    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
-        members = [m for m in zf.infolist() if not m.is_dir() and m.filename in wanted]
-        total = len(members)
-        for i, member in enumerate(members, 1):
-            dest_path = install_dir / member.filename
-            try:
-                dest_path.parent.mkdir(parents=True, exist_ok=True)
-                with zf.open(member) as src, open(dest_path, "wb") as dst:
-                    shutil.copyfileobj(src, dst)
-                applied.append(member.filename)
-            except OSError as exc:
-                if on_error is None:
-                    raise
-                on_error(member.filename, exc)
-            if on_progress is not None:
-                on_progress(i, total)
-    return applied
-
-
-def get_override_entries(override_zip: bytes) -> dict[str, list[str]]:
-    """
-    Return a dict mapping top-level groups in the overrides zip to the file paths within.
-    Files at the zip root are grouped under "" (empty string). Sub-folder files are
-    grouped under their top-level folder name; values are paths relative to that group.
-    """
-    grouped: dict[str, list[str]] = {}
-    try:
-        with zipfile.ZipFile(io.BytesIO(override_zip)) as zf:
-            for member in zf.infolist():
-                if member.is_dir():
-                    continue
-                head, sep, tail = member.filename.partition("/")
-                if sep and head:
-                    grouped.setdefault(head, []).append(tail)
-                else:
-                    grouped.setdefault("", []).append(member.filename)
-    except zipfile.BadZipFile:
-        pass
-    return grouped
-
-
-def collect_wipe_targets(install_dir: Path, folder_names: list[str]) -> list[tuple[Path, str]]:
-    """
-    For each folder name in folder_names, walk install_dir/folder_name and collect every file.
-    Returns a list of (file_path, display_name) tuples where display_name is the filename.
-    """
-    targets: list[tuple[Path, str]] = []
-    for folder_name in folder_names:
-        folder_path = install_dir / folder_name
-        if not folder_path.is_dir():
-            continue
-        for file_path in folder_path.rglob("*"):
-            if file_path.is_file():
-                targets.append((file_path, file_path.name))
-    return targets
-
-
-def group_deletes_by_folder(
-    deletes: list[tuple[Path, str]],
-    install_dir: Path,
-) -> dict[str, list[str]]:
-    """Group delete entries by their top-level folder under install_dir."""
-    grouped: dict[str, list[str]] = {}
-    for file_path, _ in deletes:
-        try:
-            rel = file_path.relative_to(install_dir)
-            parts = rel.parts
-            folder = parts[0] if len(parts) > 1 else ""
-            sub = "/".join(parts[1:]) if len(parts) > 1 else file_path.name
-        except ValueError:
-            folder = ""
-            sub = file_path.name
-        grouped.setdefault(folder, []).append(sub)
-    return grouped
-
-
-# -------------------------
-# UPDATE PLAN
-# -------------------------
-
-def build_update_plan(old_snapshot: dict, new_snapshot: dict, modpack_dir: Path) -> dict:
-    """
-    Build an ordered list of operations to migrate from old_snapshot to
-    new_snapshot in modpack_dir. Returns a dict with:
-      - 'download': [(project_id, file_id, display_name, is_update), ...]
-      - 'delete':   [(Path, display_name), ...]
-    """
-    changes  = diff_snapshots(old_snapshot, new_snapshot)
-    download = []
-    delete   = []
-
-    for project_id, old_entry in changes["removed"]:
-        existing = locate_existing_file(project_id, old_entry, modpack_dir)
-        if existing:
-            delete.append((existing, old_entry["name"]))
-
-    for project_id, old_entry, new_entry in changes["updated"]:
-        existing = locate_existing_file(project_id, old_entry, modpack_dir)
-        if existing:
-            delete.append((existing, old_entry["name"]))
-        download.append((project_id, new_entry["file_id"], new_entry["name"], True))
-
-    for project_id, new_entry in changes["added"]:
-        download.append((project_id, new_entry["file_id"], new_entry["name"], False))
-
-    return {"download": download, "delete": delete}
+    return (folder / "mods").is_dir() or (folder / BCC_CONFIG_PATH).exists()
 
 
 # -------------------------
@@ -1286,7 +873,7 @@ class UpdaterApp(tk.Tk):
         try:
             assert self.modpack_dir is not None
             self.local_version = read_installed_version(self.modpack_dir)
-            if self.local_version is not None and _bare_version(self.local_version) == "?":
+            if self.local_version is not None and bare_version(self.local_version) == "?":
                 self.fresh_install = True
 
             versions_data       = fetch_versions()
@@ -1309,7 +896,7 @@ class UpdaterApp(tk.Tk):
                 ))
                 return
 
-            if _bare_version(self.local_version) == str(self.latest_version or ""):
+            if bare_version(self.local_version) == str(self.latest_version or ""):
                 self.after(0, self._show_up_to_date)
                 return
 
@@ -1332,7 +919,7 @@ class UpdaterApp(tk.Tk):
                 font=("Consolas", 16, "bold"), bg=DARK_BG, fg=ACCENT,
             ).pack(pady=(10, 4))
             tk.Label(
-                body, text=f"Installed version: {_display_version(self.local_version)}",
+                body, text=f"Installed version: {display_version(self.local_version)}",
                 font=FONT_BODY, bg=DARK_BG, fg=TEXT_DIM,
             ).pack()
             button_row = tk.Frame(frame, bg=DARK_BG)
@@ -1449,7 +1036,7 @@ class UpdaterApp(tk.Tk):
                     wraplength=560, justify="left",
                 ).pack(anchor="w")
             else:
-                malformed = _bare_version(self.local_version) == "?"
+                malformed = bare_version(self.local_version) == "?"
                 fresh_inner = tk.Frame(fresh_row, bg=DARK_BG)
                 fresh_inner.pack(anchor="w", fill="x", padx=(8, 0))
                 fresh_cb = tk.Checkbutton(
@@ -1478,10 +1065,10 @@ class UpdaterApp(tk.Tk):
 
             if self.local_version:
                 tk.Label(
-                    body, text=f"Installed: {_display_version(self.local_version)}",
+                    body, text=f"Installed: {display_version(self.local_version)}",
                     font=FONT_MONO, bg=DARK_BG, fg=TEXT_DIM,
                 ).pack(anchor="w", pady=(12, 0))
-                if _bare_version(self.local_version) == "?":
+                if bare_version(self.local_version) == "?":
                     tk.Label(
                         body,
                         text="⚠  Installed version is unrecognized — update will proceed as a fresh install.",
@@ -1530,7 +1117,7 @@ class UpdaterApp(tk.Tk):
                     self.release_message  = entry.get("message", "")
                     self.target_modloader = entry.get("modloader", "")
                 if (not self.fresh_install
-                        and _bare_version(self.local_version) == str(version_str)):
+                        and bare_version(self.local_version) == str(version_str)):
                     old_commit = entry["commit"]
 
             if not target_commit:
@@ -1544,8 +1131,8 @@ class UpdaterApp(tk.Tk):
             server_only_ids: set[str] = set(
                 str(pid) for pid in self.versions_data.get("server_only_ids", [])
             )
-            self.new_snapshot = filter_for_client(fetch_snapshot(target_commit), server_only_ids)
-            self.old_snapshot = filter_for_client(fetch_snapshot(old_commit), server_only_ids) if old_commit else {}
+            self.new_snapshot = filter_snapshot(fetch_snapshot(target_commit), server_only_ids)
+            self.old_snapshot = filter_snapshot(fetch_snapshot(old_commit), server_only_ids) if old_commit else {}
             self.update_plan  = build_update_plan(
                 self.old_snapshot, self.new_snapshot, self.modpack_dir,
             )
@@ -1576,84 +1163,13 @@ class UpdaterApp(tk.Tk):
             self.after(0, lambda: self._show_outcome(success=False, message=error_message))
 
     def _compute_override_ops(self, reset_overrides: bool) -> dict:
-        """
-        Plan version-accurate override operations by diffing the previous and target
-        commits' override manifests (path -> sha256). Returns a dict with:
-          - 'added' / 'removed' / 'updated': {folder: [filename, ...]} for the changelog
-            ("" folder key holds zip-root files), grouped like get_override_entries.
-          - 'write':  list of zip member paths to extract (overwriting) in phase 4.
-          - 'delete': list of install-relative paths to delete in phase 4.
-
-        Policy:
-          * Files under mods/ are custom mods and are fully synced — added, overwritten
-            when their content changes, and deleted when dropped from the pack.
-          * Other override files (configs, kubejs, etc.) default to preserve-edits: only
-            missing files are written, and nothing is overwritten or deleted unless the
-            user opts into a Reset (or a fresh install), which wipes and re-extracts.
-          * Folders wiped by phase 2 (CATEGORY_DIRS on a fresh install, override folders
-            on a reset) are re-extracted here; their deletions are handled by the wipe.
-        """
-        added: dict[str, list[str]]   = {}
-        removed: dict[str, list[str]] = {}
-        updated: dict[str, list[str]] = {}
-        write: list[str]              = []
-        delete: list[str]             = []
-        ops = {"added": added, "removed": removed, "updated": updated,
-               "write": write, "delete": delete}
-        if not self.modpack_dir:
-            return ops
-
-        old = self.old_override_manifest
-        new = self.new_override_manifest
-
-        # Top-level folders that phase 2 wipes before phase 4 re-extracts.
-        wiped: set[str] = set()
-        if self.fresh_install:
-            wiped.update(CATEGORY_DIRS)
-        if reset_overrides:
-            wiped.update(self.override_folders)
-
-        for path in set(old) | set(new):
-            top      = path.split("/", 1)[0] if "/" in path else ""
-            folder   = top
-            filename = path[len(top) + 1:] if top else path
-            is_mod   = top == "mods"
-            in_old   = path in old
-            in_new   = path in new
-            changed  = in_old and in_new and old[path] != new[path]
-            exists_locally = (self.modpack_dir / path).exists()
-            folder_wiped   = top in wiped
-
-            if in_new:
-                if is_mod:
-                    if not in_old:
-                        write.append(path)
-                        added.setdefault(folder, []).append(filename)
-                    elif changed:
-                        write.append(path)
-                        updated.setdefault(folder, []).append(filename)
-                    elif folder_wiped:
-                        write.append(path)          # unchanged, but wiped — restore it
-                        if self.fresh_install:
-                            added.setdefault(folder, []).append(filename)
-                else:
-                    if folder_wiped or not exists_locally:
-                        write.append(path)
-                        if not in_old:
-                            added.setdefault(folder, []).append(filename)
-                        elif changed:
-                            updated.setdefault(folder, []).append(filename)
-                        elif self.fresh_install:
-                            added.setdefault(folder, []).append(filename)
-                    # else: preserve the player's existing copy (no write)
-            else:
-                # Dropped from the pack. Wiped folders are cleared by phase 2; otherwise
-                # only custom mods are auto-removed (configs are left for the player).
-                if is_mod and not folder_wiped and exists_locally:
-                    delete.append(path)
-                    removed.setdefault(folder, []).append(filename)
-
-        return ops
+        """Plan version-accurate override operations for the current GUI state by
+        delegating to the shared compute_override_ops (see updater_common)."""
+        return compute_override_ops(
+            self.old_override_manifest, self.new_override_manifest, self.modpack_dir,
+            fresh=self.fresh_install, reset_overrides=reset_overrides,
+            override_folders=self.override_folders, category_dirs=CATEGORY_DIRS,
+        )
 
     # ---- screen: changelog ----
 
@@ -1661,7 +1177,7 @@ class UpdaterApp(tk.Tk):
         def build() -> tk.Frame:
             frame = tk.Frame(self, bg=DARK_BG)
             from_label = (
-                _display_version(self.local_version)
+                display_version(self.local_version)
                 if self.local_version and not self.fresh_install
                 else "fresh install"
             )
@@ -1952,7 +1468,7 @@ class UpdaterApp(tk.Tk):
         def build() -> tk.Frame:
             frame = tk.Frame(self, bg=DARK_BG)
             from_label = (
-                _display_version(self.local_version) if not self.fresh_install else "fresh install"
+                display_version(self.local_version) if not self.fresh_install else "fresh install"
             )
             self._header(frame, subtitle=f"{from_label}  →  v{self.target_version}")
             self._progress_var.set("Starting…")

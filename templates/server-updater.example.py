@@ -27,477 +27,27 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 # -------------------------
-# CONFIG  (baked in at release time by modpackctl)
+# CONFIG  (shared config is in updater_common; server-specific bits below)
 # -------------------------
 
-GITHUB_USER  = "__GITHUB_USER__"
-GITHUB_REPO  = "__GITHUB_REPO__"
-MODPACK_NAME = "__MODPACK_NAME__"
-VERSIONS_URL  = f"https://{GITHUB_USER}.github.io/{GITHUB_REPO}/versions.json"
-SNAPSHOTS_URL = f"https://{GITHUB_USER}.github.io/{GITHUB_REPO}/snapshots"
-# Override files are version-controlled per commit. The content for a commit lives at
-# {OVERRIDES_URL}/{commit}.zip and its path->hash manifest at {SNAPSHOTS_URL}/{commit}.overrides.json.
-OVERRIDES_URL = f"https://{GITHUB_USER}.github.io/{GITHUB_REPO}/overrides"
+from updater_common import *  # noqa: F403  (inlined at bake time by modpackctl)
 
-if "__" in GITHUB_USER or "__" in GITHUB_REPO:
-    print(
-        "[ERROR] server-updater.py has not been configured.\n"
-        "Run 'python modpackctl.py bake-updater --server' to produce a configured copy."
-    )
-    sys.exit(1)
-
-if "__" in MODPACK_NAME:
-    MODPACK_NAME = GITHUB_REPO
-
-HEADERS = {"User-Agent": f"{GITHUB_REPO}-server-updater/1.0"}
-
-# Top-level category folders the server installs directly (mods only on the server side).
-# Shaderpacks and resourcepacks are stripped by filter_for_server.
+# The server installs mods only (shaderpacks/resourcepacks are stripped by filter_snapshot);
+# this drives the fresh-install wipe scope.
 CATEGORY_DIRS: list[str] = ["mods"]
-
-
-# -------------------------
-# PREFS  (remembers the server directory between runs)
-# -------------------------
-
-def _prefs_dir() -> Path:
-    """Return the per-user prefs directory for the updater."""
-    return Path.home() / ".modpack-updater"
-
-
-def _prefs_path() -> Path:
-    """Return the prefs file path, namespaced per modpack (server variant)."""
-    return _prefs_dir() / f"{GITHUB_USER}-{GITHUB_REPO}-server.json"
-
-
-def load_prefs() -> dict:
-    """Return saved prefs, or empty dict if missing/corrupt."""
-    path = _prefs_path()
-    if not path.exists():
-        return {}
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return {}
-
-
-def save_prefs(data: dict) -> None:
-    """Persist prefs to disk. Best-effort; failures are silently ignored."""
-    path = _prefs_path()
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    except OSError:
-        pass
-
-
-# -------------------------
-# NETWORK
-# -------------------------
-
-def fetch_json(url: str) -> dict:
-    """GET a URL and return its parsed JSON body."""
-    request = urllib.request.Request(url, headers=HEADERS)
-    with urllib.request.urlopen(request, timeout=15) as response:
-        return json.loads(response.read().decode("utf-8"))
-
-
-def fetch_versions() -> dict:
-    """Fetch versions.json from gh-pages."""
-    return fetch_json(VERSIONS_URL)
-
-
-def fetch_snapshot(commit_id: str) -> dict:
-    """Fetch a snapshot from gh-pages."""
-    return fetch_json(f"{SNAPSHOTS_URL}/{commit_id}.json")
-
-
-def fetch_override_manifest(commit_id: str) -> dict:
-    """
-    Fetch a commit's override manifest (path -> sha256 hex) from gh-pages.
-    Returns {} when the commit has no overrides or the manifest is unavailable.
-    """
-    try:
-        return fetch_json(f"{SNAPSHOTS_URL}/{commit_id}.overrides.json")
-    except (urllib.error.URLError, OSError, TimeoutError, ValueError):
-        return {}
-
-
-def fetch_overrides_zip(commit_id: str) -> bytes | None:
-    """Download a commit's overrides zip from gh-pages. Returns bytes, or None if unavailable."""
-    try:
-        request = urllib.request.Request(f"{OVERRIDES_URL}/{commit_id}.zip", headers=HEADERS)
-        with urllib.request.urlopen(request, timeout=30) as resp:
-            return resp.read()
-    except urllib.error.HTTPError as exc:
-        if exc.code == 404:
-            return None
-        return None
-    except (urllib.error.URLError, OSError, TimeoutError):
-        return None
-
-
-# -------------------------
-# FILTERING
-# -------------------------
-
-def filter_for_server(snapshot: dict, client_only_ids: set[str]) -> dict:
-    """
-    Return a copy of snapshot with client-only mods and non-mods categories removed.
-    client_only_ids is the set of project IDs that should never go on the server.
-    """
-    return {
-        project_id: entry
-        for project_id, entry in snapshot.items()
-        if project_id not in client_only_ids
-        and (entry.get("category") or "mods") == "mods"
-    }
-
-
-# -------------------------
-# DIFF
-# -------------------------
-
-def diff_snapshots(old: dict, new: dict) -> dict:
-    """
-    Compute the difference between two snapshots.
-    Returns dict with keys 'added', 'removed' (list of (pid, entry)) and
-    'updated' (list of (pid, old_entry, new_entry)).
-    """
-    added = sorted(
-        ((project_id, new[project_id]) for project_id in new if project_id not in old),
-        key=lambda pair: pair[1]["name"].lower(),
-    )
-    removed = sorted(
-        ((project_id, old[project_id]) for project_id in old if project_id not in new),
-        key=lambda pair: pair[1]["name"].lower(),
-    )
-    updated_unsorted = [
-        (project_id, old[project_id], new[project_id])
-        for project_id in set(old) & set(new)
-        if old[project_id]["file_id"] != new[project_id]["file_id"]
-    ]
-    updated = sorted(updated_unsorted, key=lambda triple: triple[2]["name"].lower())
-    return {"added": added, "removed": removed, "updated": updated}
-
-
-# -------------------------
-# FILE OPERATIONS
-# -------------------------
-
-def extract_override_members(install_dir: Path, zip_bytes: bytes, paths: list[str]) -> list[str]:
-    """
-    Extract the given member paths from the override zip into install_dir, overwriting
-    existing files. The caller decides which paths to write, so this never skips.
-    Returns a list of relative paths that were written.
-    """
-    wanted = set(paths)
-    applied: list[str] = []
-    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
-        for member in zf.infolist():
-            if member.is_dir() or member.filename not in wanted:
-                continue
-            dest_path = install_dir / member.filename
-            dest_path.parent.mkdir(parents=True, exist_ok=True)
-            with zf.open(member) as src, open(dest_path, "wb") as dst:
-                shutil.copyfileobj(src, dst)
-            applied.append(member.filename)
-    return applied
-
-
-def compute_override_ops(
-    old_manifest: dict,
-    new_manifest: dict,
-    install_dir: Path,
-    fresh: bool,
-    reset_overrides: bool,
-    override_folders: list[str],
-) -> dict:
-    """
-    Plan version-accurate override operations by diffing the previous and target
-    commits' override manifests. Mirrors the client updater's policy:
-      * Files under mods/ (custom mods) are fully synced — added, overwritten when
-        their content changes, and deleted when dropped from the pack.
-      * Other override files default to preserve-edits: only missing files are written,
-        and nothing is overwritten/deleted unless reset (or fresh) wipes the folder.
-    Returns {'write': [zip paths], 'delete': [install-relative paths],
-             'added'/'removed'/'updated': counts for reporting}.
-    """
-    write: list[str]  = []
-    delete: list[str] = []
-    added = removed = updated = 0
-
-    wiped: set[str] = set()
-    if fresh:
-        wiped.update(CATEGORY_DIRS)
-    if reset_overrides:
-        wiped.update(override_folders)
-
-    for path in set(old_manifest) | set(new_manifest):
-        top      = path.split("/", 1)[0] if "/" in path else ""
-        is_mod   = top == "mods"
-        in_old   = path in old_manifest
-        in_new   = path in new_manifest
-        changed  = in_old and in_new and old_manifest[path] != new_manifest[path]
-        exists_locally = (install_dir / path).exists()
-        folder_wiped   = top in wiped
-
-        if in_new:
-            if is_mod:
-                if not in_old:
-                    write.append(path); added += 1
-                elif changed:
-                    write.append(path); updated += 1
-                elif folder_wiped:
-                    write.append(path)
-            else:
-                if folder_wiped or not exists_locally:
-                    write.append(path)
-                    if not in_old:
-                        added += 1
-                    elif changed:
-                        updated += 1
-        else:
-            if is_mod and not folder_wiped and exists_locally:
-                delete.append(path); removed += 1
-
-    return {"write": write, "delete": delete,
-            "added": added, "removed": removed, "updated": updated}
-
-
-def get_override_folders(override_zip: bytes) -> list[str]:
-    """Return sorted top-level folder names contained in the overrides zip."""
-    folders: set[str] = set()
-    try:
-        with zipfile.ZipFile(io.BytesIO(override_zip)) as zf:
-            for name in zf.namelist():
-                head, sep, _ = name.partition("/")
-                if sep and head:
-                    folders.add(head)
-    except zipfile.BadZipFile:
-        pass
-    return sorted(folders)
-
-
-def collect_wipe_targets(install_dir: Path, folder_names: list[str]) -> list[tuple[Path, str]]:
-    """
-    For each folder name in folder_names, walk install_dir/folder_name and collect every file.
-    Returns a list of (file_path, display_name) tuples where display_name is the filename.
-    """
-    targets: list[tuple[Path, str]] = []
-    for folder_name in folder_names:
-        folder_path = install_dir / folder_name
-        if not folder_path.is_dir():
-            continue
-        for file_path in folder_path.rglob("*"):
-            if file_path.is_file():
-                targets.append((file_path, file_path.name))
-    return targets
-
-
-def classify_downloaded_file(path: Path) -> str:
-    """Inspect a downloaded file and return 'mods', 'shaderpacks', or 'resourcepacks'."""
-    if path.suffix.lower() != ".zip":
-        return "mods"
-    try:
-        with zipfile.ZipFile(path, "r") as zf:
-            member_names = zf.namelist()
-        if any(name == "shaders/" or name.startswith("shaders/") for name in member_names):
-            return "shaderpacks"
-        return "resourcepacks"
-    except zipfile.BadZipFile:
-        return "mods"
-
-
-# Folders a mod file may live in. The server only installs mods (filter_for_server strips
-# the rest), but lookups search all three so existing files are found wherever they are.
-_INSTALL_CATEGORIES = ("mods", "shaderpacks", "resourcepacks")
-
-
-def locate_existing_file(project_id: str, entry: dict, install_dir: Path) -> Path | None:
-    """
-    Find the on-disk file for a mod entry under install_dir. Prefers an exact filename
-    match in the entry's expected category, then falls back to all category folders,
-    then to a substring match by project_id. Mirrors the client updater's lookup.
-    """
-    expected_category = entry.get("category", "mods")
-    expected_filename = entry.get("file", "")
-
-    if expected_filename:
-        exact = install_dir / expected_category / expected_filename
-        if exact.exists():
-            return exact
-        for category in _INSTALL_CATEGORIES:
-            candidate = install_dir / category / expected_filename
-            if candidate.exists():
-                return candidate
-
-    for category in _INSTALL_CATEGORIES:
-        category_dir = install_dir / category
-        if not category_dir.is_dir():
-            continue
-        for file_path in category_dir.iterdir():
-            if project_id in file_path.stem:
-                return file_path
-    return None
-
-
-def download_mod_file(project_id: str, file_id: str, dest_dir: Path) -> Path | None:
-    """
-    Download a single CurseForge mod file into dest_dir.
-    Returns the local path on success, or None on failure.
-    """
-    url = f"https://www.curseforge.com/api/v1/mods/{project_id}/files/{file_id}/download"
-    request = urllib.request.Request(url, headers=HEADERS)
-    try:
-        with urllib.request.urlopen(request, timeout=60) as response:
-            final_url  = response.url
-            url_path   = urlparse(final_url).path
-            filename   = os.path.basename(unquote(url_path))
-            if not filename or "." not in filename:
-                content_type = response.headers.get("Content-Type", "")
-                extension    = ".zip" if "zip" in content_type else ".jar"
-                filename     = f"{project_id}-{file_id}{extension}"
-            local_path = dest_dir / filename
-            with open(local_path, "wb") as fh:
-                shutil.copyfileobj(response, fh)
-            return local_path
-    except (urllib.error.URLError, OSError, TimeoutError):
-        return None
-
-
-# -------------------------
-# VERSION FILE
-# -------------------------
-
-_BCC_CONFIG_PATH = Path("config") / "bcc-common.toml"
-_BCC_VERSION_RE  = re.compile(r'^([ \t]*modpackVersion\s*=\s*)"([^"]*)"', re.MULTILINE)
-_BCC_NAME_RE     = re.compile(r'^([ \t]*modpackName\s*=\s*)"([^"]*)"',    re.MULTILINE)
-
-
-def read_installed_version(server_dir: Path) -> str | None:
-    """Return the modpackVersion from config/bcc-common.toml, or None if absent/unset."""
-    bcc_path = server_dir / _BCC_CONFIG_PATH
-    if not bcc_path.exists():
-        return None
-    match = _BCC_VERSION_RE.search(bcc_path.read_text(encoding="utf-8"))
-    if not match:
-        return None
-    version = match.group(2)
-    return version if version and version != "CHANGE_ME" else None
-
-
-_BCC_TEMPLATE = """\
-#General settings
-[general]
-\t#The name of the modpack
-\tmodpackName = "{name}"
-\t#The version of the modpack
-\tmodpackVersion = "{version}"
-\t#Use the metadata.json to determine the modpack version
-\t#ONLY ENABLE THIS IF YOU KNOW WHAT YOU ARE DOING
-\tuseMetadata = false
-"""
-
-
-def _bare_version(version: str | None) -> str:
-    """
-    Normalise a stored modpackVersion to a bare 'x.y.z' string, or '?' if absent/malformed.
-    modpackName is a separate bcc field, so modpackVersion holds only the number. The legacy
-    'MODPACK_NAME - x.y.z' format (and a stray leading 'v') is still accepted for old installs.
-    """
-    if not version:
-        return "?"
-    prefix = f"{MODPACK_NAME} - "
-    if version.startswith(prefix):
-        version = version[len(prefix):]
-    version = version.strip().lstrip("vV").strip()
-    return version if re.fullmatch(r"\d+(\.\d+)*", version) else "?"
-
-
-def _display_version(version: str | None) -> str:
-    """Format a version for display: 'v1.2.0', or '?' if absent/malformed."""
-    bare = _bare_version(version)
-    return "?" if bare == "?" else f"v{bare}"
-
-
-def write_installed_version(server_dir: Path, version: str) -> None:
-    """Write modpackVersion (bare 'x.y.z') and modpackName into config/bcc-common.toml."""
-    bcc_path = server_dir / _BCC_CONFIG_PATH
-    bare = str(version)
-    if not bcc_path.exists():
-        bcc_path.parent.mkdir(parents=True, exist_ok=True)
-        bcc_path.write_text(
-            _BCC_TEMPLATE.format(name=MODPACK_NAME, version=bare),
-            encoding="utf-8",
-        )
-        return
-    text = bcc_path.read_text(encoding="utf-8")
-    text = _BCC_VERSION_RE.sub(rf'\g<1>"{bare}"', text)
-    text = _BCC_NAME_RE.sub(   rf'\g<1>"{MODPACK_NAME}"', text)
-    bcc_path.write_text(text, encoding="utf-8")
-
-
-# -------------------------
-# UPDATE PLAN
-# -------------------------
-
-def build_update_plan(old_snapshot: dict, new_snapshot: dict, install_dir: Path) -> dict:
-    """
-    Build an ordered list of operations to migrate from old_snapshot to new_snapshot.
-    Returns dict with:
-      - 'download': [(project_id, file_id, display_name, is_update), ...]
-      - 'delete':   [(Path, display_name), ...]
-    """
-    changes  = diff_snapshots(old_snapshot, new_snapshot)
-    download: list = []
-    delete:   list = []
-
-    for project_id, old_entry in changes["removed"]:
-        existing = locate_existing_file(project_id, old_entry, install_dir)
-        if existing:
-            delete.append((existing, old_entry["name"]))
-
-    for project_id, old_entry, new_entry in changes["updated"]:
-        existing = locate_existing_file(project_id, old_entry, install_dir)
-        if existing:
-            delete.append((existing, old_entry["name"]))
-        download.append((project_id, new_entry["file_id"], new_entry["name"], True))
-
-    for project_id, new_entry in changes["added"]:
-        download.append((project_id, new_entry["file_id"], new_entry["name"], False))
-
-    return {"download": download, "delete": delete}
 
 
 # -------------------------
 # DISPLAY HELPERS
 # -------------------------
 
-def _group_deletes_by_folder(
-    deletes: list[tuple[Path, str]],
-    install_dir: Path,
-) -> dict[str, list[str]]:
-    """Group delete entries by their top-level folder under install_dir."""
-    grouped: dict[str, list[str]] = {}
-    for file_path, _ in deletes:
-        try:
-            rel = file_path.relative_to(install_dir)
-            parts = rel.parts
-            folder = parts[0] if len(parts) > 1 else ""
-            sub = "/".join(parts[1:]) if len(parts) > 1 else file_path.name
-        except ValueError:
-            folder = ""
-            sub = file_path.name
-        grouped.setdefault(folder, []).append(sub)
-    return grouped
-
-
-def print_grouped_tree(grouped: dict[str, list[str]]) -> None:
+def print_grouped_tree(grouped: dict[str, list[str]], names: dict | None = None) -> None:
     """
     Print a folder-grouped tree: 'folder/' headers with '|_ name' leaves. Entries with
-    an empty folder key (zip-root files) print as flat '- name' lines.
+    an empty folder key (zip-root files) print as flat '- name' lines. names, if given,
+    maps a full 'folder/file' path to a display name (used for custom override mods).
     """
+    names = names or {}
     for folder in sorted(grouped):
         files = sorted(grouped[folder], key=str.lower)
         if not files:
@@ -505,15 +55,24 @@ def print_grouped_tree(grouped: dict[str, list[str]]) -> None:
         if folder:
             print(f"    {folder}/")
             for name in files:
-                print(f"      |_ {name}")
+                print(f"      |_ {names.get(f'{folder}/{name}', name)}")
         else:
             for name in files:
-                print(f"    - {name}")
+                print(f"    - {names.get(name, name)}")
 
 
-def print_delete_tree(deletes: list[tuple[Path, str]], install_dir: Path) -> None:
-    """Print a folder-grouped tree of files queued for deletion."""
-    print_grouped_tree(_group_deletes_by_folder(deletes, install_dir))
+def merge_grouped(*groups: dict) -> dict[str, list[str]]:
+    """Combine several {folder: [name]} dicts into one."""
+    out: dict[str, list[str]] = {}
+    for group in groups:
+        for folder, files in group.items():
+            out.setdefault(folder, []).extend(files)
+    return out
+
+
+def print_delete_tree(deletes: list[tuple[Path, str]], install_dir: Path, names: dict | None = None) -> None:
+    """Print a folder-grouped tree of files queued for deletion (group_deletes_by_folder is shared)."""
+    print_grouped_tree(group_deletes_by_folder(deletes, install_dir), names)
 
 
 def group_downloads_by_category(downloads: list, new_snapshot: dict, is_update_wanted: bool) -> dict[str, list[str]]:
@@ -536,67 +95,67 @@ def print_changelog(
     fresh: bool = False,
     install_dir: Path | None = None,
     plan: dict | None = None,
+    override_ops: dict | None = None,
+    custom_mod_names: dict | None = None,
 ) -> None:
-    """Print a human-readable changelog between two snapshots."""
+    """
+    Print a human-readable changelog. CurseForge mods and override files are grouped
+    together by destination folder (mods/, config/, …), mirroring the client updater.
+    """
+    plan             = plan or {"download": [], "delete": []}
+    override_ops     = override_ops or {}
+    custom_mod_names = custom_mod_names or {}
+    ov_added   = override_ops.get("added", {})
+    ov_removed = override_ops.get("removed", {})
+    ov_updated = override_ops.get("updated", {})
+
+    def count(grouped: dict) -> int:
+        return sum(len(v) for v in grouped.values())
+
+    cf_added   = group_downloads_by_category(plan["download"], new_snapshot, False)
+    cf_updated = group_downloads_by_category(plan["download"], new_snapshot, True)
 
     if fresh:
-        changes = diff_snapshots(old_snapshot, new_snapshot)
-        if changes["added"]:
-            print(f"\n  To Download ({len(changes['added'])}):")
-            grouped: dict[str, list[str]] = {}
-            for _project_id, entry in changes["added"]:
-                grouped.setdefault(entry.get("category") or "mods", []).append(entry["name"])
-            print_grouped_tree(grouped)
+        download_grouped = merge_grouped(cf_added, cf_updated, ov_added, ov_updated)
+        if download_grouped:
+            print(f"\n  To Download ({count(download_grouped)}):")
+            print_grouped_tree(download_grouped, custom_mod_names)
         else:
             print("\n  To Download: (none)")
 
-        if plan is not None and plan["delete"]:
+        if plan["delete"]:
             print(f"\n  To Delete ({len(plan['delete'])}):")
             if install_dir is not None:
-                print_delete_tree(plan["delete"], install_dir)
+                print_delete_tree(plan["delete"], install_dir, custom_mod_names)
             else:
                 for _, name in sorted(plan["delete"], key=lambda pair: pair[1].lower()):
                     print(f"    - {name}")
         else:
             print("\n  To Delete: (none)")
-    elif plan is not None:
-        added_names   = [name for _, _, name, is_upd in plan["download"] if not is_upd]
-        updated_names = [name for _, _, name, is_upd in plan["download"] if is_upd]
-        _updated_set  = set(updated_names)
-        removed_entries = [(p, name) for p, name in plan["delete"] if name not in _updated_set]
+        return
 
-        if added_names:
-            print(f"\n  Added ({len(added_names)}):")
-            print_grouped_tree(group_downloads_by_category(plan["download"], new_snapshot, False))
-        if removed_entries:
-            print(f"\n  Removed ({len(removed_entries)}):")
-            if install_dir is not None:
-                print_delete_tree(removed_entries, install_dir)
-            else:
-                for _, name in sorted(removed_entries, key=lambda pair: pair[1].lower()):
-                    print(f"    - {name}")
-        if updated_names:
-            print(f"\n  Updated ({len(updated_names)}):")
-            print_grouped_tree(group_downloads_by_category(plan["download"], new_snapshot, True))
-        if not added_names and not removed_entries and not updated_names:
-            print("\n  No changes.")
-    else:
-        changes = diff_snapshots(old_snapshot, new_snapshot)
-        if changes["added"]:
-            print(f"\n  Added ({len(changes['added'])}):")
-            for _, entry in changes["added"]:
-                print(f"    + {entry['name']}")
-        if changes["removed"]:
-            print(f"\n  Removed ({len(changes['removed'])}):")
-            for _, entry in changes["removed"]:
-                print(f"    - {entry['name']}")
-        if changes["updated"]:
-            print(f"\n  Updated ({len(changes['updated'])}):")
-            for _, old_entry, new_entry in changes["updated"]:
-                print(f"    ~ {new_entry['name']}")
-        total = len(changes["added"]) + len(changes["removed"]) + len(changes["updated"])
-        if total == 0:
-            print("\n  No changes.")
+    updated_names   = {name for _, _, name, is_upd in plan["download"] if is_upd}
+    removed_entries = [(p, name) for p, name in plan["delete"] if name not in updated_names]
+    added_grouped   = merge_grouped(cf_added, ov_added)
+    updated_grouped = merge_grouped(cf_updated, ov_updated)
+
+    if added_grouped:
+        print(f"\n  Added ({count(added_grouped)}):")
+        print_grouped_tree(added_grouped, custom_mod_names)
+    if removed_entries or ov_removed:
+        print(f"\n  Removed ({len(removed_entries) + count(ov_removed)}):")
+        if install_dir is not None:
+            print_delete_tree(removed_entries, install_dir, custom_mod_names)
+        else:
+            for _, name in sorted(removed_entries, key=lambda pair: pair[1].lower()):
+                print(f"    - {name}")
+        if ov_removed:
+            print_grouped_tree(ov_removed, custom_mod_names)
+    if updated_grouped:
+        print(f"\n  Updated ({count(updated_grouped)}):")
+        print_grouped_tree(updated_grouped, custom_mod_names)
+    if not added_grouped and not updated_grouped and not removed_entries and not ov_removed:
+        print("\n  No changes.")
 
 
 # -------------------------
@@ -639,6 +198,11 @@ def main() -> None:
         help="Wipe and re-extract every overrides folder (config/, kubejs/, etc.).",
     )
     parser.add_argument(
+        "--yes", "-y",
+        action="store_true",
+        help="Skip the confirmation prompt (useful for automated deployments).",
+    )
+    parser.add_argument(
         "--workers",
         type=int,
         default=10,
@@ -649,7 +213,7 @@ def main() -> None:
         argcomplete.autocomplete(parser)
     args = parser.parse_args()
 
-    prefs = load_prefs()
+    prefs = load_prefs("-server")
 
     if args.server_dir:
         server_dir = Path(args.server_dir)
@@ -675,7 +239,7 @@ def main() -> None:
     prev_dir = prefs.get("last_server_dir")
     if prev_dir != str(server_dir):
         prefs["last_server_dir"] = str(server_dir)
-        save_prefs(prefs)
+        save_prefs(prefs, "-server")
         print(f"Server directory set to: {server_dir}")
 
     mods_dir = server_dir / "mods"
@@ -721,7 +285,7 @@ def main() -> None:
 
     # Smart fresh default: if nothing is installed or version is malformed, default to fresh
     fresh: bool = args.fresh if args.fresh is not None else (installed_version is None)
-    if installed_version is not None and _bare_version(installed_version) == "?":
+    if installed_version is not None and bare_version(installed_version) == "?":
         fresh = True
 
     # ---- Fetch the target version's overrides (content + manifest) ----
@@ -747,7 +311,7 @@ def main() -> None:
     print(f"\n{MODPACK_NAME} Server Updater")
     print("=" * 40)
     if installed_version:
-        print(f"  Installed : {_display_version(installed_version)}")
+        print(f"  Installed : {display_version(installed_version)}")
     else:
         print(f"  Installed : (none detected)")
     print(f"  Target    : v{target_version}")
@@ -763,12 +327,12 @@ def main() -> None:
             print(f"[WARN] Installing this modpack will clear: {folder_list}")
         else:
             print("[WARN] Installing this modpack will clear the mods/ folder.")
-    elif _bare_version(installed_version) == "?":
+    elif bare_version(installed_version) == "?":
         print("[WARN] Installed version is unrecognized — proceeding as a fresh install.")
         if fresh_wipe_dirs:
             print(f"[WARN] The following folders will be cleared: {folder_list}")
 
-    if _bare_version(installed_version) == str(target_version) and not fresh:
+    if bare_version(installed_version) == str(target_version) and not fresh:
         print(f"\n[OK] Already on version {target_version} — nothing to do.")
         sys.exit(0)
 
@@ -780,27 +344,27 @@ def main() -> None:
         print(f"[ERROR] Could not fetch snapshot for {target_version}: {error}")
         sys.exit(1)
 
-    new_snapshot = filter_for_server(new_raw_snapshot, client_only_ids)
+    new_snapshot = filter_snapshot(new_raw_snapshot, client_only_ids, mods_only=True)
 
     if fresh:
         old_snapshot: dict = {}
     else:
         installed_entry = next(
-            (entry for entry in available_versions if str(entry["version"]) == _bare_version(installed_version)),
+            (entry for entry in available_versions if str(entry["version"]) == bare_version(installed_version)),
             None,
         )
         if installed_entry is None:
-            print(f"[WARN] Installed version '{_display_version(installed_version)}' not found in versions.json — treating as fresh install.")
+            print(f"[WARN] Installed version '{display_version(installed_version)}' not found in versions.json — treating as fresh install.")
             old_snapshot = {}
             fresh = True
         else:
-            print(f"Fetching snapshot for installed version {_display_version(installed_version)} ...")
+            print(f"Fetching snapshot for installed version {display_version(installed_version)} ...")
             try:
                 old_raw_snapshot = fetch_snapshot(installed_entry["commit"])
             except Exception as error:
-                print(f"[ERROR] Could not fetch snapshot for {_display_version(installed_version)}: {error}")
+                print(f"[ERROR] Could not fetch snapshot for {display_version(installed_version)}: {error}")
                 sys.exit(1)
-            old_snapshot = filter_for_server(old_raw_snapshot, client_only_ids)
+            old_snapshot = filter_snapshot(old_raw_snapshot, client_only_ids, mods_only=True)
             old_override_manifest = _filter_overrides(fetch_override_manifest(installed_entry["commit"]))
 
     # ---- Reset overrides prompt (before changelog so it reflects the decision) ----
@@ -819,6 +383,7 @@ def main() -> None:
     override_ops = compute_override_ops(
         old_override_manifest, new_override_manifest, server_dir,
         fresh=fresh, reset_overrides=reset_overrides, override_folders=override_folders,
+        category_dirs=CATEGORY_DIRS,
     )
 
     # ---- Build plan ----
@@ -832,12 +397,8 @@ def main() -> None:
 
     # ---- Show changelog ----
     print("\nChanges:")
-    print_changelog(old_snapshot, new_snapshot, fresh=fresh, plan=plan, install_dir=server_dir)
-    if override_ops["added"] or override_ops["removed"] or override_ops["updated"]:
-        print(
-            f"  Overrides: {override_ops['added']} added, "
-            f"{override_ops['removed']} removed, {override_ops['updated']} updated"
-        )
+    print_changelog(old_snapshot, new_snapshot, fresh=fresh, plan=plan, install_dir=server_dir,
+                    override_ops=override_ops, custom_mod_names=custom_mod_names)
 
     if not plan["download"] and not plan["delete"] and not override_ops["write"] and not override_ops["delete"]:
         print("\n[OK] Nothing to change.")
@@ -852,14 +413,15 @@ def main() -> None:
     )
 
     # ---- Confirm ----
-    try:
-        answer = input("\nProceed? [y/N] ").strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        print("\n[ERROR] Aborted.")
-        sys.exit(0)
-    if answer not in ("y", "yes"):
-        print("[INFO] Aborted.")
-        sys.exit(0)
+    if not args.yes:
+        try:
+            answer = input("\nProceed? [y/N] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\n[ERROR] Aborted.")
+            sys.exit(0)
+        if answer not in ("y", "yes"):
+            print("[INFO] Aborted.")
+            sys.exit(0)
 
     # ---- Apply: download to temp, then atomic move ----
     failed_downloads: list[str] = []

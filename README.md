@@ -235,7 +235,7 @@ python modpackctl.py publish --message "Improved performance and fixed crashes."
 | `push-pages` | Push the already-built local `gh-pages/` folder to the `gh-pages` branch (run `build-pages` first). Useful for retrying the publish step if `publish`'s gh-pages push failed. |
 | `render-readme [version]` | Render `README.md` from `README.template.md` with current values for the given version (default: latest). No-op if no template exists. Also runs automatically during a client `release`. |
 | `bake-updater [--server]` | Bake `releases/{file_prefix}-client-updater.py` from the client updater template. `--server` bakes `releases/{file_prefix}-server-updater.py` instead (no exe). |
-| `reset-file --client\|--server\|--config\|--all` | Reset a working copy in the current directory from its example template. `--client` overwrites `client-updater.py`, `--server` overwrites `server-updater.py`, `--config` overwrites `modpackctl.toml` with `modpackctl.example.toml`, `--all` resets all three. A flag is required. If an example template is missing from the modpackctl install directory it is downloaded from the modpackctl GitHub repo automatically. |
+| `reset-file --client\|--server\|--common\|--config\|--all` | Reset a working copy in the current directory from its bundled template. `--client`/`--server` overwrite the updater scripts, `--common` overwrites `updater_common.py` (the shared updater helpers), `--config` overwrites `modpackctl.toml`, `--all` resets everything. A flag is required. If a template is missing from the modpackctl install directory it is downloaded from the modpackctl GitHub repo automatically. |
 | `build-exe` | Build `releases/{file_prefix}-client-updater.exe` from the baked client updater using PyInstaller. When `enable_secret` is true, also downloads and bundles the easter egg video and audio. Requires `pip install pyinstaller yt-dlp imageio-ffmpeg Pillow`. Also runs automatically as part of `release`. |
 | `export-cf <version>` | Build a CurseForge-format modpack zip for the given version, suitable for importing directly into the CurseForge launcher. Includes `manifest.json`, `modlist.html`, and the stored overrides with `bcc-common.toml` stamped with the correct version. |
 
@@ -290,9 +290,11 @@ The flow:
 
 A **⚙ gear button** in the header opens the colour settings dialog, where players can customise all UI colours with a colour picker. Settings are saved to prefs and persist between runs.
 
-**Generating the client updater:** Running `release` (or `publish`, which calls `release` internally) reads your `modpackctl.toml` and substitutes placeholders in `client-updater.example.py`, writing the result to `releases/{file_prefix}-client-updater.py`. It then attempts to build `releases/{file_prefix}-client-updater.exe` via PyInstaller. Both files are pre-configured for your repo and require no setup on the player's end. Run `bake-updater` to produce just the script without building a release zip.
+**Shared helpers (`updater_common.py`):** The client (GUI) and server (CLI) updaters differ only by presentation; everything else — network, diff, file classification, the override-sync policy, version/`bcc-common.toml` handling — lives in `updater_common.py`, a single source of truth. Each updater script references it via `from updater_common import *`; at bake time modpackctl **inlines** that module into the script, so the file you ship stays a single, self-contained, stdlib-only `.py`. If you customise an updater, edit the GUI/CLI in its own script and shared logic in `updater_common.py`; `reset-file --common` restores it.
 
-Use these placeholders as plain string literals anywhere in `client-updater.example.py`:
+**Generating the client updater:** Running `release` (or `publish`, which calls `release` internally) reads your `modpackctl.toml`, inlines `updater_common.py` into `client-updater.py`, and substitutes placeholders, writing the result to `releases/{file_prefix}-client-updater.py`. It then attempts to build `releases/{file_prefix}-client-updater.exe` via PyInstaller. Both files are pre-configured for your repo and require no setup on the player's end. Run `bake-updater` to produce just the script without building a release zip.
+
+Use these placeholders as plain string literals anywhere in `client-updater.example.py` (`__GITHUB_USER__`, `__GITHUB_REPO__`, and `__MODPACK_NAME__` live in `updater_common.py`):
 
 | Placeholder | Replaced with |
 |---|---|
@@ -344,15 +346,9 @@ python server-updater.py [server_dir] [--version VERSION] [--fresh] [--yes] [--w
 
 The script detects and records the installed version via `config/bcc-common.toml` (`modpackVersion` field), matching the [Better Compatibility Checker](https://www.curseforge.com/minecraft/mc-mods/better-compatibility-checker) mod format. If the file is absent it is created automatically on the first update. The script defaults to a fresh install if no version is detected.
 
-**Generating:** Running `release --server` (or `bake-updater --server` for just the script) writes `releases/{file_prefix}-server-updater.py` with all placeholders baked in.
+**Generating:** Running `release --server` (or `bake-updater --server` for just the script) inlines `updater_common.py` into `server-updater.py` and bakes in the placeholders, writing `releases/{file_prefix}-server-updater.py` as a single self-contained file.
 
-Use these placeholders as plain string literals anywhere in `server-updater.example.py`:
-
-| Placeholder | Replaced with |
-|---|---|
-| `"__GITHUB_USER__"` | `github.user` from `modpackctl.toml` |
-| `"__GITHUB_REPO__"` | `github.repo` from `modpackctl.toml` |
-| `"__MODPACK_NAME__"` | `settings.modpack_name` from `modpackctl.toml` |
+The server shares all non-presentation logic with the client via `updater_common.py` (see the client updater's shared-helpers note above). Its three placeholders — `__GITHUB_USER__`, `__GITHUB_REPO__`, `__MODPACK_NAME__` — live in `updater_common.py` and are substituted at bake time.
 
 **Requirements:** Python 3.8+ and an internet connection. Uses only the standard library.
 

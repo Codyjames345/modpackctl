@@ -91,7 +91,7 @@ def save_prefs(data: dict, suffix: str = "") -> None:
 # INSTALLED VERSION  (Better Compatibility Checker's config/bcc-common.toml)
 # -------------------------
 
-_BCC_CONFIG_PATH = Path("config") / "bcc-common.toml"
+BCC_CONFIG_PATH = Path("config") / "bcc-common.toml"
 _BCC_VERSION_RE  = re.compile(r'^([ \t]*modpackVersion\s*=\s*)"([^"]*)"', re.MULTILINE)
 _BCC_NAME_RE     = re.compile(r'^([ \t]*modpackName\s*=\s*)"([^"]*)"',    re.MULTILINE)
 
@@ -110,7 +110,7 @@ _BCC_TEMPLATE = """\
 
 def read_installed_version(install_dir: Path) -> str | None:
     """Return the modpackVersion from config/bcc-common.toml, or None if absent/unset."""
-    bcc_path = install_dir / _BCC_CONFIG_PATH
+    bcc_path = install_dir / BCC_CONFIG_PATH
     if not bcc_path.exists():
         return None
     match = _BCC_VERSION_RE.search(bcc_path.read_text(encoding="utf-8"))
@@ -143,7 +143,7 @@ def display_version(version: str | None) -> str:
 
 def write_installed_version(install_dir: Path, version: str) -> None:
     """Write modpackVersion (bare 'x.y.z') and modpackName into config/bcc-common.toml."""
-    bcc_path = install_dir / _BCC_CONFIG_PATH
+    bcc_path = install_dir / BCC_CONFIG_PATH
     bare = str(version)
     if not bcc_path.exists():
         bcc_path.parent.mkdir(parents=True, exist_ok=True)
@@ -435,7 +435,7 @@ def group_deletes_by_folder(
 def compute_override_ops(
     old_manifest: dict,
     new_manifest: dict,
-    install_dir: Path,
+    install_dir: Path | None,
     fresh: bool,
     reset_overrides: bool,
     override_folders: list[str],
