@@ -308,10 +308,13 @@ def main() -> None:
         override_zip = fetch_overrides_zip(target_commit)
     except Exception:
         pass
+    # 'mods' is excluded from the reset scope: custom mods are synced exactly via the
+    # manifest diff, and the folder also holds the CurseForge mods — a reset wipe
+    # there would delete files nothing re-downloads.
     override_folders: list[str] = [
         folder
         for folder in (get_override_folders(override_zip) if override_zip else [])
-        if folder not in NON_SERVER_OVERRIDE_DIRS
+        if folder not in NON_SERVER_OVERRIDE_DIRS and folder != "mods"
     ]
 
     def _filter_overrides(manifest: dict) -> dict:

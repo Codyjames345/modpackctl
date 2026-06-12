@@ -464,12 +464,16 @@ def compute_override_ops(
 
     Policy:
       * Files under mods/ are custom mods and are fully synced — added, overwritten when
-        their content changes, and deleted when dropped from the pack.
+        their content changes, and deleted when dropped from the pack. Callers must
+        exclude 'mods' from override_folders: the folder also holds the CurseForge mods,
+        so a reset wipe there would delete files nothing re-downloads.
       * Other override files (configs, kubejs, etc.) default to preserve-edits: only
         missing files are written, and nothing is overwritten or deleted unless the user
         opts into a Reset (or a fresh install), which wipes and re-extracts.
-      * Wiped folders (category_dirs on a fresh install, override_folders on a reset) are
-        re-extracted here; their deletions are handled by the wipe.
+      * Wiped folders (category_dirs on a fresh install, override_folders plus zip-root
+        files on a reset) are re-extracted here; their deletions are handled by the wipe.
+        Reset re-extractions are reported under 'updated' (or 'added' on a fresh install)
+        so the changelog shows exactly which files lose local edits.
     """
     added: dict[str, list[str]]   = {}
     removed: dict[str, list[str]] = {}
@@ -486,6 +490,7 @@ def compute_override_ops(
         wiped.update(category_dirs)
     if reset_overrides:
         wiped.update(override_folders)
+        wiped.add("")  # zip-root override files are reset to pack defaults too
 
     for path in set(old_manifest) | set(new_manifest):
         top      = path.split("/", 1)[0] if "/" in path else ""
@@ -518,6 +523,12 @@ def compute_override_ops(
                     elif changed:
                         updated.setdefault(folder, []).append(filename)
                     elif fresh:
+                        added.setdefault(folder, []).append(filename)
+                    elif folder_wiped:
+                        # unchanged but re-extracted by a reset — local edits discarded
+                        updated.setdefault(folder, []).append(filename)
+                    else:
+                        # unchanged but missing locally — restored
                         added.setdefault(folder, []).append(filename)
                 # else: preserve the player's existing copy (no write)
         else:

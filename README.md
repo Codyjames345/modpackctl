@@ -362,7 +362,7 @@ When the updaters apply overrides, they diff the installed version's manifest ag
 
 - **Custom mods** (anything under `mods/`) are fully synced — added, overwritten when their content changes, and deleted when dropped from the pack. Players don't hand-edit mod jars, so this is always safe.
 - **Other override files** (configs, KubeJS, etc.) default to preserve-edits: only files that do not already exist are written, and nothing is overwritten or deleted, so players keep their customisations.
-- **Reset overrides** (the updater checkbox, or `--reset-overrides` on the server) wipes and re-extracts every override folder, resetting them to the pack defaults.
+- **Reset overrides** (the updater checkbox, or `--reset-overrides` on the server) wipes and re-extracts every override folder (and zip-root override files), resetting them to the pack defaults. `mods/` is never wiped by a reset — custom mods are kept in sync automatically, and the folder also holds the CurseForge mods. The re-extracted files are listed in the changelog under Updated, grouped by folder.
 
 ### Naming and side-filtering custom mods
 

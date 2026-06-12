@@ -912,6 +912,7 @@ class UpdaterApp(tk.Tk):
                 return
 
             self.target_version = self.latest_version
+            self._version_from_up_to_date = False
             self.after(0, self._show_version_options)
         except Exception as exc:
             error_message = f"Error checking for updates:\n\n{exc}"
@@ -937,11 +938,17 @@ class UpdaterApp(tk.Tk):
             button_row.pack(fill="x", padx=20, pady=12)
             self._register_konami_button_row(button_row)
             self._secondary_button(
-                button_row, "Choose version…", self._show_version_options,
+                button_row, "Choose version…", self._choose_version_from_up_to_date,
             ).pack(side="right", padx=(10, 0))
             self._primary_button(button_row, "Close", self._on_close).pack(side="right")
             return frame
         self._swap_frame(build)
+
+    def _choose_version_from_up_to_date(self) -> None:
+        """Open the version picker from the up-to-date screen; it then offers a
+        Back button (returning here) instead of Cancel."""
+        self._version_from_up_to_date = True
+        self._show_version_options()
 
     # ---- screen: version options ----
 
@@ -1095,8 +1102,15 @@ class UpdaterApp(tk.Tk):
 
             button_row = tk.Frame(frame, bg=DARK_BG)
             button_row.pack(fill="x", padx=20, pady=12)
+            if self._version_from_up_to_date:
+                # Reached from the up-to-date screen — offer Back (to it) instead of
+                # Cancel. Packed before the konami row so Dance? lands to its right.
+                self._secondary_button(
+                    button_row, "←  Back", self._show_up_to_date,
+                ).pack(side="left")
             self._register_konami_button_row(button_row)
-            self._secondary_button(button_row, "Cancel", self._on_close).pack(side="right", padx=(10, 0))
+            if not self._version_from_up_to_date:
+                self._secondary_button(button_row, "Cancel", self._on_close).pack(side="right", padx=(10, 0))
             self._primary_button(button_row, "Continue  →", confirm).pack(side="right")
             return frame
         self._swap_frame(build)
@@ -1172,7 +1186,12 @@ class UpdaterApp(tk.Tk):
             except Exception:
                 self.override_zip = None
             self.override_entries = get_override_entries(self.override_zip) if self.override_zip else {}
-            self.override_folders = sorted(folder for folder in self.override_entries if folder)
+            # 'mods' is excluded from the reset scope: custom mods are synced exactly
+            # via the manifest diff, and the folder also holds the CurseForge mods —
+            # a reset wipe there would delete files nothing re-downloads.
+            self.override_folders = sorted(
+                folder for folder in self.override_entries if folder and folder != "mods"
+            )
 
             self.after(0, self._show_changelog)
         except Exception as exc:
@@ -1680,10 +1699,10 @@ class UpdaterApp(tk.Tk):
             if failed_downloads:
                 failed_list = "\n".join(f"• {name}" for name in sorted(failed_downloads, key=str.lower))
                 self.after(0, lambda: self._show_outcome(
-                    success=False,
+                    success=False, partial=True,
                     message=(
-                        f"Update applied, but {len(failed_downloads)} file(s) failed to download:\n\n"
-                        f"{failed_list}\n\n"
+                        f"Updated to v{self.target_version}, but {len(failed_downloads)} "
+                        f"file(s) failed to download:\n\n{failed_list}\n\n"
                         "Your installed version was not updated — run the updater again to retry."
                     ),
                 ))
@@ -1715,8 +1734,11 @@ class UpdaterApp(tk.Tk):
             font=FONT_MONO, bg=DARK_BG, fg=GREEN, anchor="center",
         ).pack(side="left", fill="x", expand=True)
 
-    def _show_outcome(self, success: bool, message: str) -> None:
-        colour = ACCENT if success else RED
+    def _show_outcome(self, success: bool, message: str, partial: bool = False) -> None:
+        """Show the final result. Green for success, yellow for a partial update
+        (applied, but some downloads failed), red for failure."""
+        colour = GREEN if success else (YELLOW if partial else RED)
+        icon   = "✓" if success else ("⚠" if partial else "✗")
         if self._update_button_row is not None:
             # Inline result on the download screen — just update the progress label
             # and add a Finish button; don't navigate away.
@@ -1737,7 +1759,7 @@ class UpdaterApp(tk.Tk):
             # Update _current_builder so that returning from the dance screen
             # shows a proper outcome screen rather than rebuilding the blank
             # updating screen (which would show "Starting…" with an empty log).
-            _success, _message, _colour = success, message, colour
+            _success, _message, _colour, _icon = success, message, colour, icon
             def _outcome_builder() -> tk.Frame:
                 self._update_button_row = None
                 self._update_progress_label = None
@@ -1745,9 +1767,8 @@ class UpdaterApp(tk.Tk):
                 self._header(frame)
                 body = tk.Frame(frame, bg=DARK_BG, padx=20, pady=40)
                 body.pack(fill="both", expand=True)
-                icon = "✓" if _success else "✗"
                 tk.Label(
-                    body, text=icon,
+                    body, text=_icon,
                     font=("Consolas", 32, "bold"), bg=DARK_BG, fg=_colour,
                 ).pack(pady=(0, 8))
                 tk.Label(
@@ -1770,7 +1791,6 @@ class UpdaterApp(tk.Tk):
                 self._header(frame)
                 body = tk.Frame(frame, bg=DARK_BG, padx=20, pady=40)
                 body.pack(fill="both", expand=True)
-                icon = "✓" if success else "✗"
                 tk.Label(
                     body, text=icon,
                     font=("Consolas", 32, "bold"), bg=DARK_BG, fg=colour,
@@ -1956,7 +1976,7 @@ class UpdaterApp(tk.Tk):
         def add_back_button(frame: tk.Frame) -> None:
             row = tk.Frame(frame, bg=DARK_BG)
             row.pack(fill="x", padx=20, pady=12, side="bottom")
-            self._secondary_button(row, "← Back", go_back).pack(side="right")
+            self._secondary_button(row, "←  Back", go_back).pack(side="left")
 
         def start_rainbow_flash(frame: tk.Frame, body: tk.Frame) -> None:
             after_id: list[str | None] = [None]
@@ -2057,7 +2077,7 @@ class UpdaterApp(tk.Tk):
                 countdown_label.place(relx=1.0, x=-16, y=12, anchor="ne")
 
                 def on_drop() -> None:
-                    self._secondary_button(back_row, "← Back", go_back).pack(side="right")
+                    self._secondary_button(back_row, "←  Back", go_back).pack(side="left")
                     if _ENABLE_RAINBOW:
                         start_rainbow_flash(frame, body)
 
