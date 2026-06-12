@@ -351,6 +351,9 @@ class UpdaterApp(tk.Tk):
         self.target_version: str | None     = None
         self.fresh_install: bool            = False
         self.versions_list: list[str]       = []
+        # True when the version-options screen was reached from the "up to date" screen,
+        # so it offers a Back button (to that screen) instead of Cancel.
+        self._version_from_up_to_date: bool = False
         self.versions_data: dict            = {}
         self.release_message: str           = ""
         self.target_modloader: str          = ""

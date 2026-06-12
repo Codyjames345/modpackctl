@@ -2380,29 +2380,23 @@ def reset_file(client: bool = False, server: bool = False, config: bool = False,
         tasks.append((CONFIG_FILE, CONFIG_EXAMPLE.name, True))
 
     for target, example_name, is_config in tasks:
-        if is_config:
-            if target.exists():
-                prompt = f"Overwrite {target} with {example_name}? This will erase your current config. [y/N] "
+        if target.exists():
+            if is_config:
+                prompt = f"Overwrite {target.name} with {example_name}? THIS WILL ERASE YOUR CURRENT CONFIG. [y/N] "
             else:
-                print(f"[INFO] {target.name} does not exist — copying {example_name} from repo.")
+                prompt = f"Delete {target.name} and replace with {example_name} from repo? [y/N] "
+            answer = input(prompt).strip().lower()
+            if answer not in ("y", "yes"):
+                print(f"[INFO] Skipped {target.name}.")
                 continue
         else:
-            if target.exists():
-                prompt = f"Delete {target.name} and replace with {example_name} from repo? [y/N] "
-            else:
-                print(f"[INFO] {target.name} does not exist — copying {example_name} from repo.")
-                continue
-            
-        answer = input(prompt).strip().lower()
-        if answer not in ("y", "yes"):
-            print("[INFO] Aborted.")
-            sys.exit(0)
+            # Nothing to overwrite — just create it from the template (no prompt).
+            print(f"[INFO] {target.name} does not exist — creating it from {example_name}.")
+
         src = _ensure_example(example_name)
         if src is None:
             print(f"[ERROR] Could not obtain {example_name}.")
             sys.exit(1)
-        if not is_config:
-            target.unlink(missing_ok=True)
         shutil.copy2(src, target)
         print(f"[OK] Reset {target.name} from {example_name}.")
 
