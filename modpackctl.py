@@ -1333,13 +1333,13 @@ def update(
     exclude_overrides drops specific override paths (side-only custom mods).
 
     suffix is a display label ('client' or 'server') appended to output messages.
-    Returns a stats dict: { downloaded, cached, failed, ok, overrides }.
+    Returns a stats dict: { downloaded, cached, failed, failed_names, ok, overrides }.
     """
     excluded_ids = {str(project_id) for project_id in exclude} if exclude else set()
     commit_id    = get_commit(version)
     if not commit_id:
         print(f"[ERROR] Version '{version}' not found.")
-        return {"downloaded": 0, "cached": 0, "failed": 0, "ok": 0, "overrides": 0}
+        return {"downloaded": 0, "cached": 0, "failed": 0, "failed_names": [], "ok": 0, "overrides": 0}
 
     snapshot = load_snapshot(commit_id)
 
@@ -1367,9 +1367,14 @@ def update(
     BUILD.mkdir(parents=True, exist_ok=True)
 
     downloaded = cached = failed = 0
+    failed_names: list[str] = []
     total_count = len(mods_to_build)
     completed_count = 0
     successful_results: list[dict] = []
+
+    def display_name_of(project_id: str) -> str:
+        entry = snapshot.get(project_id)
+        return (entry.get("name") if isinstance(entry, dict) else None) or project_id
 
     with ThreadPoolExecutor(max_workers=10) as executor:
         future_to_project_id = {
@@ -1394,7 +1399,8 @@ def update(
                 print(f"  [+] [{source_tag}] [{completed_count}/{total_count}] {result['file']}")
             except Exception as exc:
                 failed += 1
-                print(f"  [WARN] [{completed_count}/{total_count}] Failed to get {project_id}: {exc}")
+                failed_names.append(display_name_of(project_id))
+                print(f"  [WARN] [{completed_count}/{total_count}] Failed to get {display_name_of(project_id)} ({project_id}): {exc}")
 
     # Fill file and category into the snapshot for each successfully built mod.
     # Excluded and failed mods keep their existing snapshot entry unchanged.
@@ -1436,8 +1442,8 @@ def update(
         summary += f", {failed} failed"
     print(f"\n[OK] Updated to {label}  ({summary})")
 
-    return {"downloaded": downloaded, "cached": cached, "failed": failed, "ok": ok,
-            "overrides": override_count}
+    return {"downloaded": downloaded, "cached": cached, "failed": failed,
+            "failed_names": failed_names, "ok": ok, "overrides": override_count}
 
 
 # -------------------------
@@ -1471,7 +1477,9 @@ def release(version: str, side: str = "client") -> Path | None:
                    suffix=side, exclude_overrides=filters["exclude_overrides"])
 
     if stats["failed"] != 0:
-        print("[ERROR] Release aborted: not all mods could be fetched.")
+        print(f"[ERROR] Release aborted: {stats['failed']} mod(s) could not be fetched:")
+        for failed_name in sorted(stats.get("failed_names", []), key=str.lower):
+            print(f"    - {failed_name}")
         return None
 
     override_count = stats["overrides"]

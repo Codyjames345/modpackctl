@@ -447,8 +447,12 @@ def main() -> None:
             print("[INFO] Aborted.")
             sys.exit(0)
 
-    # ---- Apply: download to temp, then atomic move ----
+    # ---- Apply: download to temp first, then delete/move ----
+    # Failed downloads don't abort the update: the rest is applied, the old file is
+    # kept when an updated mod's new version failed, and the installed version is
+    # left unstamped so a re-run retries the failures.
     failed_downloads: list[str] = []
+    failed_update_names: set[str] = set()
     updated_names = {name for _, _, name, is_upd in plan["download"] if is_upd}
 
     if plan["download"]:
@@ -473,13 +477,20 @@ def main() -> None:
                     else:
                         print(f"  [FAIL] {display_name}")
                         failed_downloads.append(display_name)
+                        if is_update:
+                            failed_update_names.add(display_name)
 
             if failed_downloads:
-                print(f"\n[ERROR] {len(failed_downloads)} download(s) failed. Aborting — no files changed.")
-                sys.exit(1)
+                print(f"\n[WARN] {len(failed_downloads)} download(s) failed:")
+                for name in sorted(failed_downloads, key=str.lower):
+                    print(f"    - {name}")
+                print("       Continuing with the rest of the update; existing files for failed updates are kept.")
 
-            # All downloads succeeded — delete old files then move new ones in
+            # Delete old files (skipping ones whose replacement failed) then move new ones in
             for file_path, display_name in plan["delete"]:
+                if display_name in failed_update_names:
+                    print(f"  [KEEP] {display_name} (new version failed to download — keeping the old file)")
+                    continue
                 try:
                     file_path.unlink()
                     if display_name not in updated_names:
@@ -522,6 +533,13 @@ def main() -> None:
                 print(f"\n{label}")
                 for rel_path in applied:
                     print(f"  + {custom_mod_names.get(rel_path, rel_path)}")
+
+    if failed_downloads:
+        print(f"\n[WARN] Update finished, but {len(failed_downloads)} mod(s) failed to download:")
+        for name in sorted(failed_downloads, key=str.lower):
+            print(f"    - {name}")
+        print("       The installed version was left unchanged — re-run the updater to retry them.")
+        sys.exit(1)
 
     write_installed_version(server_dir, target_version)
     print(f"\n[OK] Updated to {MODPACK_NAME} {target_version}")

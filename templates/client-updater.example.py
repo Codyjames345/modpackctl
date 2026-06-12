@@ -1554,9 +1554,12 @@ class UpdaterApp(tk.Tk):
             updated_names = {name for _, _, name, is_upd in downloads if is_upd}
             downloaded_files: list[tuple[Path, str, bool, str]] = []
             failed_downloads: list[str] = []
+            failed_update_names: set[str] = set()
 
-            # Phase 1: download all new/updated files concurrently — kept atomic so a
-            # mid-download failure doesn't leave the user with deleted files.
+            # Phase 1: download all new/updated files concurrently, before anything is
+            # deleted. Failed downloads don't abort the update: the rest is applied,
+            # the old file is kept when an updated mod's new version failed, and the
+            # installed version is left unstamped so a re-run retries the failures.
             completed_count = 0
             count_lock = threading.Lock()
             if downloads:
@@ -1575,6 +1578,8 @@ class UpdaterApp(tk.Tk):
                     self._set_progress(f"Downloading {count} / {len(downloads)}…")
                     if local_path is None:
                         failed_downloads.append(display_name)
+                        if is_update:
+                            failed_update_names.add(display_name)
                         self._log(f"  [FAIL] {display_name}", "log_error")
                         continue
                     category = classify_downloaded_file(local_path)
@@ -1583,24 +1588,21 @@ class UpdaterApp(tk.Tk):
 
             if failed_downloads:
                 self._log("")
-                self._log(f"[ERROR] {len(failed_downloads)} file(s) failed to download.", "log_error")
-                self._log("        Your modpack was not modified.", "log_error")
-                self.after(0, lambda: self._show_outcome(
-                    success=False,
-                    message=(
-                        f"{len(failed_downloads)} file(s) failed to download.\n"
-                        "Your modpack was not modified. Check your internet "
-                        "connection and try again."
-                    ),
-                ))
-                return
+                self._log(f"[warn] {len(failed_downloads)} file(s) failed to download:", "log_warn")
+                for name in sorted(failed_downloads, key=str.lower):
+                    self._log(f"    - {name}", "log_error")
+                self._log("[warn] Continuing with the rest of the update; existing files for failed updates are kept.", "log_warn")
 
             # Phase 2: delete every queued file (incremental old files + any wiped
             # category/override folder contents collected during _show_changelog).
+            # Files whose replacement failed to download are kept.
             if deletions:
                 self._set_progress("Removing files…")
                 self._log("")
                 for old_path, display_name in deletions:
+                    if display_name in failed_update_names:
+                        self._log(f"  [keep] {display_name} (new version failed to download — keeping the old file)", "log_warn")
+                        continue
                     try:
                         old_path.unlink()
                         if display_name not in updated_names:
@@ -1672,7 +1674,21 @@ class UpdaterApp(tk.Tk):
                     self._log("  [warn] override content unavailable — skipped.", "log_warn")
 
             # Phase 5: record the installed version last — a crash during
-            # phases 1-4 leaves bcc-common.toml at the previous version.
+            # phases 1-4 leaves bcc-common.toml at the previous version. With
+            # failed downloads the version is left unstamped on purpose, so the
+            # next run diffs from the old version and retries the failures.
+            if failed_downloads:
+                failed_list = "\n".join(f"• {name}" for name in sorted(failed_downloads, key=str.lower))
+                self.after(0, lambda: self._show_outcome(
+                    success=False,
+                    message=(
+                        f"Update applied, but {len(failed_downloads)} file(s) failed to download:\n\n"
+                        f"{failed_list}\n\n"
+                        "Your installed version was not updated — run the updater again to retry."
+                    ),
+                ))
+                return
+
             write_installed_version(self.modpack_dir, self.target_version)
 
             self.after(0, lambda: self._show_outcome(

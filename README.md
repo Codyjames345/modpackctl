@@ -285,7 +285,7 @@ The flow:
 3. **Version select** — dropdown defaulting to the latest version; includes a **Fresh install** checkbox to wipe existing files and re-download everything clean. On confirm, the relevant snapshots are fetched from GitHub Pages.
 4. **Changelog** — shows exactly what will be added, removed, and updated, grouped by destination folder (`mods/`, `shaderpacks/`, `resourcepacks/`, `config/`, …).
 5. **Confirm & Update** — explicit click before any files are touched.
-6. **Atomic install** — all new files download to a temp folder first; if anything fails the install is left untouched.
+6. **Safe install** — all new files download to a temp folder before anything is deleted. If a download fails, the rest of the update is still applied: the failed mods are listed by name, the previous file is kept when an updated mod's new version failed, and the installed version is left unstamped so re-running the updater retries them.
 7. **Outcome** — clear success/error summary.
 
 A **⚙ gear button** in the header opens the colour settings dialog, where players can customise all UI colours with a colour picker. Settings are saved to prefs and persist between runs.
