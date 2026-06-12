@@ -83,7 +83,7 @@ Alternatively, download and extract a release zip from the [Releases page](__REL
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 All __PLACEHOLDER__ tokens in this file are replaced automatically by modpackctl
-when you run `update`, `release`, or `publish` (client builds only).
+when you run `render-readme`, `release`, or `publish` (client builds only).
 
 README PLACEHOLDERS
 ───────────────────
@@ -114,6 +114,9 @@ Write them as plain string literals in the template files.
   "__ENABLE_SECRET__"     → True / False  (settings.enable_secret, default True)
   "__SECRET_VIDEO_URL__"  → settings.secret_video_url (defaults to Never Gonna Give You Up)
   "__ENABLE_RAINBOW__"    → True / False  (settings.enable_rainbow, default False)
+  "__RAINBOW_BPM__"       → settings.rainbow_bpm as a float (default 113.0)
+  "__BEAT_DROP_SECONDS__" → settings.beat_drop as a float (default 43.5)
+  "__COLOUR_DEFAULTS_JSON__" → JSON dict of the theme colours from [settings.colours]
 
   Server updater only supports: __GITHUB_USER__, __GITHUB_REPO__, __MODPACK_NAME__
 -->

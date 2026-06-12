@@ -200,6 +200,8 @@ def _init_working_dir() -> None:
     # or the filesystem root if there is no git repo.
     current = Path.cwd()
     while True:
+        if (current / ".git").is_dir():  # repo root — don't search above it
+            break
         parent = current.parent
         if parent == current:   # filesystem root — give up
             break
@@ -208,8 +210,6 @@ def _init_working_dir() -> None:
             print(f"[INFO] Working directory: {parent}")
             return
         current = parent
-        if (current / ".git").is_dir():  # stop at repo root
-            break
 
     print(f"No {CONFIG_FILE} found in the current directory.")
     answer = input("Initialize a working directory here? (This will also create a git repo.) [y/N] ").strip().lower()
@@ -900,7 +900,9 @@ def download_mod(project_id: str, file_id: str, force: bool = False) -> dict:
         }
 
     url = f"https://www.curseforge.com/api/v1/mods/{project_id}/files/{file_id}/download"
-    response = requests.get(url, stream=True, headers=HEADERS, allow_redirects=True)
+    # timeout covers connect + gaps between chunks, so a hung CDN connection
+    # fails the download instead of blocking a build worker indefinitely.
+    response = requests.get(url, stream=True, headers=HEADERS, allow_redirects=True, timeout=30)
     response.raise_for_status()
 
     filename   = guess_filename(response, project_id, file_id)
@@ -1235,7 +1237,7 @@ def changelog(
         lines.append("## 🔧 Modloader")
         lines.append(f"- Updated: _{old_modloader}_ → _{new_modloader}_")
         lines.append("")
-    elif v1 == "EMPTY" and new_modloader:
+    elif v1 is None and new_modloader:
         # Show the starting modloader on initial release for reference
         lines.append("## 🔧 Modloader")
         lines.append(f"- {new_modloader}")
@@ -1415,8 +1417,16 @@ def update(
 
     # Merge the version's override tree (configs, custom mods, etc.) on top of the
     # downloaded mods so BUILD/ mirrors the final .minecraft layout. Side-only custom
-    # mods are dropped here for client/server builds.
-    override_count = apply_overrides(BUILD, commit_id, exclude_paths=exclude_overrides)
+    # mods are dropped here for client/server builds, as are override files under an
+    # excluded category folder (shaderpacks/, resourcepacks/ on server builds) —
+    # matching the changelog's apply_override_filter.
+    excluded_override_paths = set(exclude_overrides) if exclude_overrides else set()
+    if exclude_categories:
+        excluded_override_paths |= {
+            path for path in load_override_manifest(commit_id)
+            if path.split("/", 1)[0] in exclude_categories
+        }
+    override_count = apply_overrides(BUILD, commit_id, exclude_paths=excluded_override_paths)
     if override_count:
         print(f"  {override_count} override file(s) merged into build.")
 
@@ -2016,10 +2026,10 @@ def _prepare_dance_assets() -> tuple[Path, Path] | None:
         return None
 
     cached_url = url_record.read_text(encoding="utf-8").strip() if url_record.exists() else ""
-    if cached_url != dance_url and video_path.exists():
-        video_path.unlink()
-        if audio_path.exists():
-            audio_path.unlink()
+    if cached_url != dance_url:
+        for stale_path in (video_path, audio_path):
+            if stale_path.exists():
+                stale_path.unlink()
 
     if not video_path.exists():
         print("Downloading dance video for bundling...")
@@ -2449,8 +2459,8 @@ def _validate_and_serialize_colours(settings: dict) -> str:
 
 
 def _validate_beat_drop(settings: dict) -> float:
-    """Read settings.beat_drop, validating it's a non-negative number. Defaults to 44.0."""
-    value = settings.get("beat_drop", 44.0)
+    """Read settings.beat_drop, validating it's a non-negative number. Defaults to 43.5."""
+    value = settings.get("beat_drop", 43.5)
     if not isinstance(value, (int, float)) or isinstance(value, bool) or value < 0:
         print(f"[ERROR] settings.beat_drop must be a non-negative number, got: {value!r}")
         sys.exit(1)
@@ -2503,7 +2513,7 @@ def bake_client_updater() -> bool:
       __ENABLE_SECRET__        — True/False; settings.enable_secret (default: True)
       __ENABLE_RAINBOW__       — True/False; settings.enable_rainbow (default: False)
       __RAINBOW_BPM__          — float BPM; settings.rainbow_bpm (default: 113.0)
-      __BEAT_DROP_SECONDS__    — float seconds; settings.beat_drop (default: 44.0)
+      __BEAT_DROP_SECONDS__    — float seconds; settings.beat_drop (default: 43.5)
       __COLOUR_DEFAULTS_JSON__ — JSON dict of the 11 theme colours, validated against
                                  [settings.colours] in modpackctl.toml
     """
@@ -2545,8 +2555,9 @@ def bake_client_updater() -> bool:
 
 def bake_server_updater() -> bool:
     """
-    Substitute config placeholders in server-updater.example.py and write the result to
-    releases/{file_prefix}-server-updater.py. Returns False if the template is not present.
+    Inline updater_common.py and substitute config placeholders in server-updater.py,
+    writing the result to releases/{file_prefix}-server-updater.py. Returns False if the
+    template is not present.
 
     Supported placeholders:
       __GITHUB_USER__  — GitHub username from modpackctl.toml
@@ -2811,7 +2822,7 @@ if __name__ == "__main__":
     parser_reset_file_group.add_argument("--all", dest="all_files", action="store_true", help="Overwrite all updater files and the config")
 
     # build-exe
-    subparsers.add_parser("build-exe", help="Build releases/client-updater.exe from the baked client updater")
+    subparsers.add_parser("build-exe", help="Build releases/{file_prefix}-client-updater.exe from the baked client updater")
 
     # export-cf
     parser_export_cf = subparsers.add_parser("export-cf", help="Build a CurseForge-format modpack zip for a version")
@@ -2880,14 +2891,11 @@ if __name__ == "__main__":
         elif v2 is None:
             v2 = v1
             v1 = None
-        if args.server:
-            cl_exclude            = get_filter_list("client_only")
-            cl_exclude_categories = {"shaderpacks", "resourcepacks"}
-        else:
-            cl_exclude            = get_filter_list("server_only")
-            cl_exclude_categories = None
+        cl_filters = _side_filters("server" if args.server else "client")
         changelog(v1, v2, out=args.out, message=args.message,
-                  exclude=cl_exclude, exclude_categories=cl_exclude_categories)
+                  exclude=cl_filters["exclude"],
+                  exclude_categories=cl_filters["exclude_categories"],
+                  exclude_overrides=cl_filters["exclude_overrides"])
 
     elif args.command == "release":
         version = args.version

@@ -26,12 +26,16 @@ import time
 import tkinter as tk
 import urllib.error
 import urllib.request
-import winsound
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from tkinter import colorchooser, filedialog, messagebox, ttk
 from urllib.parse import unquote, urlparse
+
+try:
+    import winsound  # Windows-only; used for the easter egg audio
+except ImportError:
+    winsound = None  # type: ignore[assignment]
 
 try:
     import yt_dlp as _yt_dlp  # type: ignore[import-untyped]
@@ -881,11 +885,15 @@ class UpdaterApp(tk.Tk):
 
             versions_data       = fetch_versions()
             self.versions_data  = versions_data
-            self.latest_version = versions_data.get("latest")
             self.versions_list  = [
                 str(entry["version"])
                 for entry in versions_data.get("versions", [])
             ]
+            # versions.json lists oldest → newest; fall back to the newest entry
+            # when 'latest' is absent (matching the server updater).
+            self.latest_version = versions_data.get("latest") or (
+                self.versions_list[-1] if self.versions_list else None
+            )
             # Display names for custom override mods the CurseForge API can't resolve.
             self.custom_mod_names = versions_data.get("custom_mod_names", {})
 
@@ -1130,6 +1138,12 @@ class UpdaterApp(tk.Tk):
                 ))
                 return
             self.target_commit = target_commit
+
+            # Installed version not found in versions.json — treat as a fresh
+            # install (matching the server updater) so stale files are wiped
+            # instead of new files being layered on top of them.
+            if not self.fresh_install and self.local_version and old_commit is None:
+                self.fresh_install = True
 
             server_only_ids: set[str] = set(
                 str(pid) for pid in self.versions_data.get("server_only_ids", [])
@@ -2060,16 +2074,18 @@ class UpdaterApp(tk.Tk):
                         self._dance_fps_ref[0] = fps
 
                         def audio_starter() -> None:
-                            try:
-                                if not _DANCE_WARMUP_WAV.exists():
-                                    _generate_silent_wav(_DANCE_WARMUP_WAV)
-                                winsound.PlaySound(
-                                    str(_DANCE_WARMUP_WAV),
-                                    winsound.SND_FILENAME | winsound.SND_SYNC,
-                                )
-                            except Exception:
-                                pass
-                            winsound.PlaySound(str(audio_path), winsound.SND_FILENAME | winsound.SND_ASYNC)
+                            # winsound is Windows-only; elsewhere the video plays silently.
+                            if winsound is not None:
+                                try:
+                                    if not _DANCE_WARMUP_WAV.exists():
+                                        _generate_silent_wav(_DANCE_WARMUP_WAV)
+                                    winsound.PlaySound(
+                                        str(_DANCE_WARMUP_WAV),
+                                        winsound.SND_FILENAME | winsound.SND_SYNC,
+                                    )
+                                except Exception:
+                                    pass
+                                winsound.PlaySound(str(audio_path), winsound.SND_FILENAME | winsound.SND_ASYNC)
                             actual_start = time.monotonic()
                             self._dance_audio_start = actual_start
                             self._dance_start_time[0] = actual_start

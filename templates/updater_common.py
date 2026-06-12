@@ -351,11 +351,24 @@ def extract_override_members(
     """
     wanted = set(paths)
     applied: list[str] = []
+    install_root = install_dir.resolve()
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
         members = [m for m in zf.infolist() if not m.is_dir() and m.filename in wanted]
         total = len(members)
         for i, member in enumerate(members, 1):
             dest_path = install_dir / member.filename
+            # Zip-slip guard: never extract a member whose resolved destination
+            # escapes install_dir (e.g. '../' components or an absolute path).
+            try:
+                dest_path.resolve().relative_to(install_root)
+            except ValueError:
+                exc = OSError(f"unsafe path outside install directory: {member.filename}")
+                if on_error is None:
+                    raise exc
+                on_error(member.filename, exc)
+                if on_progress is not None:
+                    on_progress(i, total)
+                continue
             try:
                 dest_path.parent.mkdir(parents=True, exist_ok=True)
                 with zf.open(member) as src, open(dest_path, "wb") as dst:

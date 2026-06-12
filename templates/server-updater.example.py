@@ -36,6 +36,10 @@ from updater_common import *  # noqa: F403  (inlined at bake time by modpackctl)
 # this drives the fresh-install wipe scope.
 CATEGORY_DIRS: list[str] = ["mods"]
 
+# Override files under these top-level folders are client-only content and are never
+# installed on the server (mirrors filter_snapshot's mods_only behaviour for CF mods).
+NON_SERVER_OVERRIDE_DIRS: set[str] = {"shaderpacks", "resourcepacks"}
+
 
 # -------------------------
 # DISPLAY HELPERS
@@ -115,6 +119,19 @@ def print_changelog(
     cf_added   = group_downloads_by_category(plan["download"], new_snapshot, False)
     cf_updated = group_downloads_by_category(plan["download"], new_snapshot, True)
 
+    # Wipe-targets that the override zip re-extracts shouldn't appear in
+    # Removed/To Delete — they show up under Added/Updated instead (same path,
+    # new content). Mirrors the client updater's changelog.
+    updated_names = {name for _, _, name, is_upd in plan["download"] if is_upd}
+    override_write_paths: set[Path] = (
+        {install_dir / p for p in (override_ops.get("write") or [])}
+        if install_dir is not None else set()
+    )
+    removed_entries = [
+        (p, name) for p, name in plan["delete"]
+        if name not in updated_names and p not in override_write_paths
+    ]
+
     if fresh:
         download_grouped = merge_grouped(cf_added, cf_updated, ov_added, ov_updated)
         if download_grouped:
@@ -123,19 +140,16 @@ def print_changelog(
         else:
             print("\n  To Download: (none)")
 
-        if plan["delete"]:
-            print(f"\n  To Delete ({len(plan['delete'])}):")
+        if removed_entries:
+            print(f"\n  To Delete ({len(removed_entries)}):")
             if install_dir is not None:
-                print_delete_tree(plan["delete"], install_dir, custom_mod_names)
+                print_delete_tree(removed_entries, install_dir, custom_mod_names)
             else:
-                for _, name in sorted(plan["delete"], key=lambda pair: pair[1].lower()):
+                for _, name in sorted(removed_entries, key=lambda pair: pair[1].lower()):
                     print(f"    - {name}")
         else:
             print("\n  To Delete: (none)")
         return
-
-    updated_names   = {name for _, _, name, is_upd in plan["download"] if is_upd}
-    removed_entries = [(p, name) for p, name in plan["delete"] if name not in updated_names]
     added_grouped   = merge_grouped(cf_added, ov_added)
     updated_grouped = merge_grouped(cf_updated, ov_updated)
 
@@ -200,7 +214,7 @@ def main() -> None:
     parser.add_argument(
         "--yes", "-y",
         action="store_true",
-        help="Skip the confirmation prompt (useful for automated deployments).",
+        help="Skip the confirmation and reset-overrides prompts (useful for automated deployments).",
     )
     parser.add_argument(
         "--workers",
@@ -242,8 +256,6 @@ def main() -> None:
         save_prefs(prefs, "-server")
         print(f"Server directory set to: {server_dir}")
 
-    mods_dir = server_dir / "mods"
-
     # ---- Fetch available versions ----
     print(f"Fetching version list from {VERSIONS_URL} ...")
     try:
@@ -277,8 +289,10 @@ def main() -> None:
         print(f"[ERROR] Version '{target_version_str}' not found. Available: {available}")
         sys.exit(1)
 
-    target_version = str(target_entry["version"])
-    target_commit  = target_entry["commit"]
+    target_version   = str(target_entry["version"])
+    target_commit    = target_entry["commit"]
+    release_message  = target_entry.get("message", "")
+    target_modloader = target_entry.get("modloader", "")
 
     # ---- Detect installed version ----
     installed_version = read_installed_version(server_dir)
@@ -294,12 +308,18 @@ def main() -> None:
         override_zip = fetch_overrides_zip(target_commit)
     except Exception:
         pass
-    override_folders: list[str] = get_override_folders(override_zip) if override_zip else []
+    override_folders: list[str] = [
+        folder
+        for folder in (get_override_folders(override_zip) if override_zip else [])
+        if folder not in NON_SERVER_OVERRIDE_DIRS
+    ]
 
     def _filter_overrides(manifest: dict) -> dict:
-        if not client_only_overrides:
-            return manifest
-        return {p: h for p, h in manifest.items() if p not in client_only_overrides}
+        return {
+            p: h for p, h in manifest.items()
+            if p not in client_only_overrides
+            and p.split("/", 1)[0] not in NON_SERVER_OVERRIDE_DIRS
+        }
 
     new_override_manifest = _filter_overrides(fetch_override_manifest(target_commit))
     old_override_manifest: dict = {}
@@ -315,6 +335,8 @@ def main() -> None:
     else:
         print(f"  Installed : (none detected)")
     print(f"  Target    : v{target_version}")
+    if target_modloader:
+        print(f"  Modloader : {target_modloader}")
     if fresh:
         print(f"  Mode      : fresh install")
     else:
@@ -368,8 +390,9 @@ def main() -> None:
             old_override_manifest = _filter_overrides(fetch_override_manifest(installed_entry["commit"]))
 
     # ---- Reset overrides prompt (before changelog so it reflects the decision) ----
+    # --yes skips the prompt and keeps the default (no reset) for automated runs.
     reset_overrides = bool(args.reset_overrides)
-    if override_folders and not reset_overrides:
+    if override_folders and not reset_overrides and not args.yes:
         override_list = ", ".join(f"{name}/" for name in override_folders)
         reset_prompt = f"\nWould you like to reset overrides? The following folders will be wiped and re-extracted:\n{override_list}"
         try:
@@ -387,7 +410,6 @@ def main() -> None:
     )
 
     # ---- Build plan ----
-    mods_dir.mkdir(parents=True, exist_ok=True)
     plan = build_update_plan(old_snapshot, new_snapshot, server_dir)
     if fresh:
         for folder_name in fresh_wipe_dirs:
@@ -396,6 +418,8 @@ def main() -> None:
         plan["delete"].extend(collect_wipe_targets(server_dir, override_folders))
 
     # ---- Show changelog ----
+    if release_message:
+        print(f"\n  Note: {release_message}")
     print("\nChanges:")
     print_changelog(old_snapshot, new_snapshot, fresh=fresh, plan=plan, install_dir=server_dir,
                     override_ops=override_ops, custom_mod_names=custom_mod_names)

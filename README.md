@@ -179,13 +179,13 @@ server_only = [123456, 789012]
 client_only = [345678]
 ```
 
-5. Re-run `init` to import your first modpack version and initialize the version history:
+6. Re-run `init` to import your first modpack version and initialize the version history:
 
 ```
 modpackctl init MyModpack-1.0.0.zip
 ```
 
-6. Once modpackctl prints the remote setup reminder, add your GitHub remote and push:
+7. Once modpackctl prints the remote setup reminder, add your GitHub remote and push:
 
 ```
 git remote add origin https://github.com/<user>/<repo>.git
@@ -226,7 +226,7 @@ python modpackctl.py publish --message "Improved performance and fixed crashes."
 | `log` | List all committed versions with diff stats. |
 | `remove-commit [version]` | Permanently remove a committed version from history. Prompts for confirmation. Irreversible. `version` defaults to the latest committed version if omitted. |
 | `set-message [version] [message]` | Set the release note for any committed version. `version` defaults to the latest committed version if omitted. Omit the message to clear it. |
-| `changelog [v1] [v2] [--out output.md] [--server]` | Generate a changelog. With no versions, generates a single-version changelog for the latest version. With one version, treats it as an initial release. With two versions, diffs between them. `--server` excludes client-only mods, shaderpacks, and resourcepacks. |
+| `changelog [v1] [v2] [--out output.md] [--client \| --server] [--message "..."]` | Generate a changelog. With no versions, generates a single-version changelog for the latest version. With one version, treats it as an initial release. With two versions, diffs between them. `--client` (default) excludes server-only mods; `--server` excludes client-only mods, shaderpacks, and resourcepacks. `--message` inserts a note below the heading. |
 | `release [version] [--server]` | Build a release zip and update `gh-pages/` locally. Client (default): also builds a CurseForge export zip, bakes `releases/{file_prefix}-client-updater.py`, and compiles `releases/{file_prefix}-client-updater.exe` (if PyInstaller is available). `--server`: bakes `releases/{file_prefix}-server-updater.py` instead (no exe, no CurseForge zip). `version` defaults to the latest committed version if omitted. |
 | `publish [version] [--message "..."]` | Build a client release (calls `release` internally), create a GitHub Release with client-filtered changelog notes, push `versions.json` and `snapshots/` to `gh-pages`, and push an updated `README.md` and `.gitignore` to the working repo. Uploads the zip, baked `.py`, and `.exe` (if built). `version` defaults to the latest committed version if omitted. `--message` overrides the message set at `commit` time. |
 | `update [version] [--server]` | Rebuild the `build/` folder for a version (mods + merged overrides, mirroring `.minecraft`) without zipping. Defaults to client view; `--server` excludes client-only mods, shaderpacks, and resourcepacks. `version` defaults to the latest committed version if omitted. |
@@ -306,7 +306,7 @@ Use these placeholders as plain string literals anywhere in `client-updater.exam
 | `"__SECRET_VIDEO_URL__"` | `settings.secret_video_url`, or the default Never Gonna Give You Up URL |
 | `"__ENABLE_RAINBOW__"` | `settings.enable_rainbow` as `True` or `False` (default: `False`) |
 | `"__RAINBOW_BPM__"` | `settings.rainbow_bpm` as a float (default: `113.0`) — positive; malformed values abort the bake |
-| `"__BEAT_DROP_SECONDS__"` | `settings.beat_drop` as a float (default: `44.0`) — non-negative; malformed values abort the bake |
+| `"__BEAT_DROP_SECONDS__"` | `settings.beat_drop` as a float (default: `43.5`) — non-negative; malformed values abort the bake |
 | `"__COLOUR_DEFAULTS_JSON__"` | JSON dict of the 11 theme colours, validated against `[settings.colours]` in `modpackctl.toml` |
 
 Run `build-exe` to compile the `.exe` from an already-baked script.
@@ -331,7 +331,7 @@ To enable exe building, install the build dependencies once: `pip install pyinst
 `server-updater.example.py` is a CLI script for keeping the server's mods folder in sync with published releases. It excludes client-only mods (as listed in `versions.json`) and non-mod categories (shaderpacks, resourcepacks).
 
 ```
-python server-updater.py [server_dir] [--version VERSION] [--fresh] [--yes] [--workers N]
+python server-updater.py [server_dir] [--version VERSION] [--fresh | --no-fresh] [--reset-overrides] [--yes] [--workers N]
 ```
 
 | Argument | Description |
@@ -341,7 +341,7 @@ python server-updater.py [server_dir] [--version VERSION] [--fresh] [--yes] [--w
 | `--fresh` | Wipe the mods folder and re-download everything clean. |
 | `--no-fresh` | Force an incremental update even if no version is detected. |
 | `--reset-overrides` | Wipe and re-extract every overrides folder (config/, kubejs/, etc.), discarding local edits. |
-| `--yes` | Skip the confirmation prompt (useful for automated deployments). |
+| `--yes` | Skip the confirmation and reset-overrides prompts (useful for automated deployments). |
 | `--workers N` | Number of parallel download workers (default: 10). |
 
 The script detects and records the installed version via `config/bcc-common.toml` (`modpackVersion` field), matching the [Better Compatibility Checker](https://www.curseforge.com/minecraft/mc-mods/better-compatibility-checker) mod format. If the file is absent it is created automatically on the first update. The script defaults to a fresh install if no version is detected.
@@ -388,7 +388,8 @@ Side-only custom mods are dropped from the opposite side's release zip, CurseFor
   dl_cache/         — persistent jar store (avoids re-downloading on rebuild)
 .pyinstaller/       — PyInstaller build cache (not committed)
 build/              — current working build mirroring .minecraft (mods/ + merged overrides: config/, kubejs/, etc.)
-releases/           — output zips, {file_prefix}-updater.py, and {file_prefix}-updater.exe
+releases/           — output zips, the baked {file_prefix}-client-updater.py/.exe and {file_prefix}-server-updater.py
+gh-pages/           — locally built versions.json, snapshots/, and overrides/ (pushed to the gh-pages branch)
 modpackctl.toml     — your config (not committed)
 ```
 
