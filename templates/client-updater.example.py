@@ -1841,7 +1841,7 @@ class UpdaterApp(tk.Tk):
             activebackground=KONAMI, activeforeground="white",
             relief="flat", bd=0, padx=14, pady=8, cursor="hand2",
             command=self._show_dance,
-        ).pack(side="left")
+        ).pack(side="left", padx=(10, 0))
 
     # ---- easter egg: beat-drop timer + DVD logo bounce ----
 
