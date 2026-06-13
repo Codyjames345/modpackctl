@@ -2063,7 +2063,8 @@ def _prepare_icon() -> Path | None:
         from PIL import Image  # type: ignore[import]
         ico_path = PYINSTALLER / "icon.ico"
         ico_path.parent.mkdir(parents=True, exist_ok=True)
-        with urllib.request.urlopen(logo_url, timeout=10) as response:
+        request = urllib.request.Request(logo_url, headers=HEADERS)
+        with urllib.request.urlopen(request, timeout=10) as response:
             image_data = response.read()
         img = Image.open(io.BytesIO(image_data)).convert("RGBA")
         # Pad to square then upscale to 256×256 so all ICO sizes are clean downscales
