@@ -393,8 +393,9 @@ server_only_overrides = ["config/server-only-mod.toml"]       # never installed 
 
 # Override paths that should not be version-controlled at all — runtime/working files
 # some mods rewrite inside config/ (last-opened GUI state, caches, …) that would
-# otherwise churn the changelog on every export.
-override_ignore = ["config/jei/*.ini", "config/fancymenu/**"]
+# otherwise churn the changelog on every export. '*' matches across '/', so a trailing
+# /* covers a whole folder recursively.
+override_ignore = ["config/jei/*.ini", "config/fancymenu/*"]
 ```
 
 `client_only_overrides` / `server_only_overrides` are expanded to concrete paths and published in `versions.json`, so the server updater never installs client-only folders and vice versa. `override_ignore` is applied at `commit` time — matching files are simply not tracked. Files already committed before adding a pattern stay tracked until they next change; commit again after editing them to drop them from history going forward.

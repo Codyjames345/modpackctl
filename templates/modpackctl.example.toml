@@ -60,9 +60,10 @@ client_only = []
 
 # Optional: override paths (glob patterns) that should NOT be version-controlled at all.
 # Use this for runtime/working files some mods rewrite inside config/ (last-opened GUI
-# state, caches, etc.) that would otherwise show up as "updated" on every export. '*'
-# matches across '/'. Already-committed files stay tracked until they next change.
-# override_ignore = ["config/jei/*.ini", "config/*-client.json", "config/fancymenu/**"]
+# state, caches, etc.) that would otherwise show up as "updated" on every export.
+# Matching is case-sensitive, and '*' matches across '/' (so a trailing '/*' covers a
+# whole folder recursively). Already-committed files stay tracked until they next change.
+# override_ignore = ["config/jei/*.ini", "config/*-client.json", "config/fancymenu/*"]
 
 # Optional: custom mods / override files that aren't on CurseForge (e.g. a jar you
 # modified yourself and dropped in overrides/mods/). They're version-controlled like
