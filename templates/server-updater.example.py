@@ -52,7 +52,7 @@ def print_grouped_tree(grouped: dict[str, list[str]], names: dict | None = None)
     maps a full 'folder/file' path to a display name (used for custom override mods).
     """
     names = names or {}
-    for folder in sorted(grouped):
+    for folder in sorted(grouped, key=override_folder_sort_key):
         files = sorted(grouped[folder], key=str.lower)
         if not files:
             continue
@@ -63,15 +63,6 @@ def print_grouped_tree(grouped: dict[str, list[str]], names: dict | None = None)
         else:
             for name in files:
                 print(f"    - {names.get(name, name)}")
-
-
-def merge_grouped(*groups: dict) -> dict[str, list[str]]:
-    """Combine several {folder: [name]} dicts into one."""
-    out: dict[str, list[str]] = {}
-    for group in groups:
-        for folder, files in group.items():
-            out.setdefault(folder, []).extend(files)
-    return out
 
 
 def print_delete_tree(deletes: list[tuple[Path, str]], install_dir: Path, names: dict | None = None) -> None:
@@ -101,17 +92,19 @@ def print_changelog(
     plan: dict | None = None,
     override_ops: dict | None = None,
     custom_mod_names: dict | None = None,
-) -> None:
+) -> dict:
     """
     Print a human-readable changelog. CurseForge mods and override files are grouped
     together by destination folder (mods/, config/, …), mirroring the client updater.
+    Returns a stats dict {"added", "removed", "updated"} of file counts so the caller's
+    summary line matches exactly what was printed.
     """
     plan             = plan or {"download": [], "delete": []}
     override_ops     = override_ops or {}
     custom_mod_names = custom_mod_names or {}
-    ov_added   = override_ops.get("added", {})
-    ov_removed = override_ops.get("removed", {})
-    ov_updated = override_ops.get("updated", {})
+    ov_added   = dict(override_ops.get("added", {}))
+    ov_removed = dict(override_ops.get("removed", {}))
+    ov_updated = dict(override_ops.get("updated", {}))
 
     def count(grouped: dict) -> int:
         return sum(len(v) for v in grouped.values())
@@ -131,45 +124,48 @@ def print_changelog(
         (p, name) for p, name in plan["delete"]
         if name not in updated_names and p not in override_write_paths
     ]
+    # Custom override mods dropped between versions aren't wipe targets — fold them
+    # into the removed tree so they're counted and shown alongside the rest.
+    removed_grouped = (
+        group_deletes_by_folder(removed_entries, install_dir)
+        if install_dir is not None
+        else {"": [name for _, name in removed_entries]}
+    )
+    removed_grouped = merge_grouped(removed_grouped, ov_removed)
 
     if fresh:
         download_grouped = merge_grouped(cf_added, cf_updated, ov_added, ov_updated)
+        dedupe_grouped(download_grouped, {}, removed_grouped)
         if download_grouped:
             print(f"\n  To Download ({count(download_grouped)}):")
             print_grouped_tree(download_grouped, custom_mod_names)
         else:
             print("\n  To Download: (none)")
 
-        if removed_entries:
-            print(f"\n  To Delete ({len(removed_entries)}):")
-            if install_dir is not None:
-                print_delete_tree(removed_entries, install_dir, custom_mod_names)
-            else:
-                for _, name in sorted(removed_entries, key=lambda pair: pair[1].lower()):
-                    print(f"    - {name}")
+        if removed_grouped:
+            print(f"\n  To Delete ({count(removed_grouped)}):")
+            print_grouped_tree(removed_grouped, custom_mod_names)
         else:
             print("\n  To Delete: (none)")
-        return
+        return {"added": count(download_grouped), "removed": count(removed_grouped), "updated": 0}
+
     added_grouped   = merge_grouped(cf_added, ov_added)
     updated_grouped = merge_grouped(cf_updated, ov_updated)
+    dedupe_grouped(added_grouped, updated_grouped, removed_grouped)
 
     if added_grouped:
         print(f"\n  Added ({count(added_grouped)}):")
         print_grouped_tree(added_grouped, custom_mod_names)
-    if removed_entries or ov_removed:
-        print(f"\n  Removed ({len(removed_entries) + count(ov_removed)}):")
-        if install_dir is not None:
-            print_delete_tree(removed_entries, install_dir, custom_mod_names)
-        else:
-            for _, name in sorted(removed_entries, key=lambda pair: pair[1].lower()):
-                print(f"    - {name}")
-        if ov_removed:
-            print_grouped_tree(ov_removed, custom_mod_names)
+    if removed_grouped:
+        print(f"\n  Removed ({count(removed_grouped)}):")
+        print_grouped_tree(removed_grouped, custom_mod_names)
     if updated_grouped:
         print(f"\n  Updated ({count(updated_grouped)}):")
         print_grouped_tree(updated_grouped, custom_mod_names)
-    if not added_grouped and not updated_grouped and not removed_entries and not ov_removed:
+    if not added_grouped and not updated_grouped and not removed_grouped:
         print("\n  No changes.")
+    return {"added": count(added_grouped), "removed": count(removed_grouped),
+            "updated": count(updated_grouped)}
 
 
 # -------------------------
@@ -212,6 +208,11 @@ def main() -> None:
         help="Wipe and re-extract every overrides folder (config/, kubejs/, etc.).",
     )
     parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show the changelog for the target version and exit without changing any files.",
+    )
+    parser.add_argument(
         "--yes", "-y",
         action="store_true",
         help="Skip the confirmation and reset-overrides prompts (useful for automated deployments).",
@@ -226,6 +227,14 @@ def main() -> None:
     if argcomplete:
         argcomplete.autocomplete(parser)
     args = parser.parse_args()
+
+    # A dry run only reports; never wipe or touch files just to preview a version.
+    if args.dry_run:
+        args.reset_overrides = False
+
+    if args.workers < 1:
+        print(f"[WARN] --workers must be at least 1; using 1 instead of {args.workers}.")
+        args.workers = 1
 
     prefs = load_prefs("-server")
 
@@ -357,7 +366,7 @@ def main() -> None:
         if fresh_wipe_dirs:
             print(f"[WARN] The following folders will be cleared: {folder_list}")
 
-    if bare_version(installed_version) == str(target_version) and not fresh:
+    if bare_version(installed_version) == str(target_version) and not fresh and not args.dry_run:
         print(f"\n[OK] Already on version {target_version} — nothing to do.")
         sys.exit(0)
 
@@ -393,9 +402,9 @@ def main() -> None:
             old_override_manifest = _filter_overrides(fetch_override_manifest(installed_entry["commit"]))
 
     # ---- Reset overrides prompt (before changelog so it reflects the decision) ----
-    # --yes skips the prompt and keeps the default (no reset) for automated runs.
+    # --yes (and --dry-run) skip the prompt and keep the default (no reset).
     reset_overrides = bool(args.reset_overrides)
-    if override_folders and not reset_overrides and not args.yes:
+    if override_folders and not reset_overrides and not args.yes and not args.dry_run:
         override_list = ", ".join(f"{name}/" for name in override_folders)
         reset_prompt = f"\nWould you like to reset overrides? The following folders will be wiped and re-extracted:\n{override_list}"
         try:
@@ -424,20 +433,28 @@ def main() -> None:
     if release_message:
         print(f"\n  Note: {release_message}")
     print("\nChanges:")
-    print_changelog(old_snapshot, new_snapshot, fresh=fresh, plan=plan, install_dir=server_dir,
-                    override_ops=override_ops, custom_mod_names=custom_mod_names)
+    stats = print_changelog(old_snapshot, new_snapshot, fresh=fresh, plan=plan, install_dir=server_dir,
+                            override_ops=override_ops, custom_mod_names=custom_mod_names)
 
-    if not plan["download"] and not plan["delete"] and not override_ops["write"] and not override_ops["delete"]:
+    # Summary line derived from the same counts the changelog printed, so the numbers
+    # always agree with the tree above (and mirror the client updater's stats row).
+    if fresh:
+        print(f"\n  {stats['added']} file(s) to download, {stats['removed']} file(s) to delete.")
+    else:
+        print(f"\n  {stats['added']} added, {stats['removed']} removed, {stats['updated']} updated.")
+
+    nothing_to_change = not (
+        plan["download"] or plan["delete"] or override_ops["write"] or override_ops["delete"]
+    )
+
+    if args.dry_run:
+        print("\n[INFO] Dry run — no files were changed.")
+        sys.exit(0)
+
+    if nothing_to_change:
         print("\n[OK] Nothing to change.")
         write_installed_version(server_dir, target_version)
         sys.exit(0)
-
-    download_count = len(plan["download"])
-    delete_count   = len(plan["delete"])
-    print(
-        f"\n  {download_count} file(s) to download,"
-        f" {delete_count} file(s) to remove."
-    )
 
     # ---- Confirm ----
     if not args.yes:

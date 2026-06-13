@@ -50,6 +50,20 @@ server_only = []
 # List project IDs to exclude from server releases (client-side only mods)
 client_only = []
 
+# Optional: override paths (glob patterns) that belong to only one side — the override
+# equivalent of server_only / client_only. Matching files are dropped from the other
+# side's release zip, CurseForge export, and updater install. '*' matches across '/',
+# so "player_models/*" covers a whole folder. Published to versions.json so both
+# updaters honour them.
+# client_only_overrides = ["player_models/*", "emotecraft/*"]   # never installed on servers
+# server_only_overrides = ["config/server-only-mod.toml"]       # never installed on clients
+
+# Optional: override paths (glob patterns) that should NOT be version-controlled at all.
+# Use this for runtime/working files some mods rewrite inside config/ (last-opened GUI
+# state, caches, etc.) that would otherwise show up as "updated" on every export. '*'
+# matches across '/'. Already-committed files stay tracked until they next change.
+# override_ignore = ["config/jei/*.ini", "config/*-client.json", "config/fancymenu/**"]
+
 # Optional: custom mods / override files that aren't on CurseForge (e.g. a jar you
 # modified yourself and dropped in overrides/mods/). They're version-controlled like
 # any other override, but since the CurseForge API can't resolve them you can give each

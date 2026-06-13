@@ -410,6 +410,52 @@ def get_override_folders(override_zip: bytes) -> list[str]:
     return sorted(folder for folder in get_override_entries(override_zip) if folder)
 
 
+def merge_grouped(*groups: dict) -> dict[str, list[str]]:
+    """Combine several {folder: [name, ...]} dicts into one."""
+    out: dict[str, list[str]] = {}
+    for group in groups:
+        for folder, files in group.items():
+            out.setdefault(folder, []).extend(files)
+    return out
+
+
+def override_folder_sort_key(folder: str) -> tuple[int, str]:
+    """
+    Sort key for grouped changelog/download trees: 'mods/' (custom mods) always
+    comes first, then zip-root files, then every other folder alphabetically. Used
+    by both updaters so custom mods are listed ahead of config files everywhere.
+    """
+    if folder == "mods":
+        return (0, "")
+    if folder == "":
+        return (1, "")
+    return (2, folder.lower())
+
+
+def dedupe_grouped(added: dict, updated: dict, removed: dict) -> None:
+    """
+    Guard against a file appearing under more than one section of a changelog.
+
+    The override planner's buckets are already disjoint, but a CurseForge mod and an
+    override file can independently land on the same folder/name (e.g. a jar tracked
+    both as a CF project and as an overrides/mods/ file). Mutates the dicts in place so
+    each (folder, name) appears in at most one section, with precedence
+    removed > updated > added. Empty folder keys are pruned.
+    """
+    def names_in(grouped: dict) -> set[tuple[str, str]]:
+        return {(folder, name) for folder, files in grouped.items() for name in files}
+
+    def strip(grouped: dict, taken: set[tuple[str, str]]) -> None:
+        for folder in list(grouped):
+            grouped[folder] = [n for n in grouped[folder] if (folder, n) not in taken]
+            if not grouped[folder]:
+                del grouped[folder]
+
+    removed_names = names_in(removed)
+    strip(updated, removed_names)
+    strip(added, removed_names | names_in(updated))
+
+
 def collect_wipe_targets(install_dir: Path, folder_names: list[str]) -> list[tuple[Path, str]]:
     """
     For each folder name in folder_names, walk install_dir/folder_name and collect every file.

@@ -313,6 +313,8 @@ Run `build-exe` to compile the `.exe` from an already-baked script.
 
 To enable exe building, install the build dependencies once: `pip install pyinstaller yt-dlp imageio-ffmpeg Pillow`
 
+If PyInstaller is **not installed**, `release`/`publish` skip the exe with a warning and still produce the `.py` updater. If PyInstaller **is** installed but the build genuinely fails, `release`, `publish`, and `build-exe` abort with a non-zero exit instead of silently reporting success, so a release is never published with a missing or stale exe.
+
 **Distribution:** `publish` uploads up to four assets to the GitHub Release: the modpack zip, the CurseForge export zip, `{file_prefix}-client-updater.py`, and `{file_prefix}-client-updater.exe` (if the PyInstaller build succeeded). `publish` also pushes snapshots to the `gh-pages` branch so the changelog displays real names like "Sodium" instead of project IDs.
 
 - **New players** — download `{file_prefix}-client-updater.exe` (no Python needed) or `{file_prefix}-client-updater.py` (requires Python 3.8+) and save it anywhere. The updater handles a fresh install automatically — no modpack zip required. The release zip and CurseForge zip remain available for those who prefer a manual install.
@@ -331,7 +333,7 @@ To enable exe building, install the build dependencies once: `pip install pyinst
 `server-updater.example.py` is a CLI script for keeping the server's mods folder in sync with published releases. It excludes client-only mods (as listed in `versions.json`) and non-mod categories (shaderpacks, resourcepacks).
 
 ```
-python server-updater.py [server_dir] [--version VERSION] [--fresh | --no-fresh] [--reset-overrides] [--yes] [--workers N]
+python server-updater.py [server_dir] [--version VERSION] [--fresh | --no-fresh] [--reset-overrides] [--dry-run] [--yes] [--workers N]
 ```
 
 | Argument | Description |
@@ -341,6 +343,7 @@ python server-updater.py [server_dir] [--version VERSION] [--fresh | --no-fresh]
 | `--fresh` | Wipe the mods folder and re-download everything clean. |
 | `--no-fresh` | Force an incremental update even if no version is detected. |
 | `--reset-overrides` | Wipe and re-extract every overrides folder (config/, kubejs/, etc.), discarding local edits. |
+| `--dry-run` | Print the changelog for the target version (use with `--version` to preview any version) and exit without changing any files. |
 | `--yes` | Skip the confirmation and reset-overrides prompts (useful for automated deployments). |
 | `--workers N` | Number of parallel download workers (default: 10). |
 
@@ -376,6 +379,25 @@ side = "server"                 # "client", "server", or omit for both
 ```
 
 Side-only custom mods are dropped from the opposite side's release zip, CurseForge export, and updater install, and the names/side lists are published to `gh-pages` so both updaters honour them.
+
+### Side-filtering and ignoring override folders
+
+For override files that aren't custom mods (player models, client-only config, etc.), two `[settings]` lists take glob patterns instead of per-file entries:
+
+```toml
+[settings]
+# Override paths that belong to only one side (the override equivalent of
+# server_only / client_only). '*' matches across '/', so a trailing /* covers a folder.
+client_only_overrides = ["player_models/*", "emotecraft/*"]   # never installed on servers
+server_only_overrides = ["config/server-only-mod.toml"]       # never installed on clients
+
+# Override paths that should not be version-controlled at all — runtime/working files
+# some mods rewrite inside config/ (last-opened GUI state, caches, …) that would
+# otherwise churn the changelog on every export.
+override_ignore = ["config/jei/*.ini", "config/fancymenu/**"]
+```
+
+`client_only_overrides` / `server_only_overrides` are expanded to concrete paths and published in `versions.json`, so the server updater never installs client-only folders and vice versa. `override_ignore` is applied at `commit` time — matching files are simply not tracked. Files already committed before adding a pattern stay tracked until they next change; commit again after editing them to drop them from history going forward.
 
 ## Repository Layout
 

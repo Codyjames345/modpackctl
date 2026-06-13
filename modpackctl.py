@@ -4,6 +4,8 @@ try:
     import argcomplete
 except ModuleNotFoundError:
     argcomplete = None  # type: ignore[assignment]
+import fnmatch
+import importlib.util
 import json
 import re
 import zipfile
@@ -287,9 +289,59 @@ def get_custom_mod_names() -> dict[str, str]:
     return {path: meta["name"] for path, meta in get_custom_mods().items() if meta["name"]}
 
 
+def get_override_ignore_patterns() -> list[str]:
+    """
+    Return the glob patterns from [settings] override_ignore.
+
+    Files in the overrides/ tree matching any pattern are not tracked at commit time —
+    used to skip runtime/working files that some mods rewrite inside config/ (and would
+    otherwise churn the changelog on every export). Matching is case-sensitive against
+    the posix path under overrides/ (e.g. 'config/jei/*.ini'). '*' matches across '/'.
+    """
+    cfg      = load_config()
+    patterns = cfg.get("settings", {}).get("override_ignore", [])
+    return [str(pattern) for pattern in patterns] if isinstance(patterns, list) else []
+
+
+def _all_override_paths() -> set[str]:
+    """Return every override path tracked across all committed versions."""
+    paths: set[str] = set()
+    for entry in load_log():
+        paths |= set(load_override_manifest(entry["commit"]).keys())
+    return paths
+
+
+def get_side_only_override_globs(side: str) -> list[str]:
+    """
+    Return the override glob patterns declared client-only / server-only via
+    [settings] client_only_overrides / server_only_overrides. These mark whole folders
+    or path globs (e.g. 'player_models/*') as belonging to one side, the override
+    equivalent of the client_only / server_only mod-ID lists. '*' matches across '/'.
+    """
+    key = f"{side}_only_overrides"
+    cfg = load_config()
+    patterns = cfg.get("settings", {}).get(key, [])
+    return [str(pattern) for pattern in patterns] if isinstance(patterns, list) else []
+
+
 def get_side_only_overrides(side: str) -> set[str]:
-    """Return the override paths declared for the given side only ('client' or 'server')."""
-    return {path for path, meta in get_custom_mods().items() if meta["side"] == side}
+    """
+    Return the override paths that belong to the given side only ('client' or 'server').
+
+    Combines per-file custom_mods declared with that side and the glob patterns from
+    [settings] {side}_only_overrides, expanded against every override path tracked so
+    far. Concrete paths (not globs) are returned so every downstream consumer — release
+    filtering, the CF export, changelog exclusion, and the published versions.json —
+    can keep using plain set membership.
+    """
+    exact = {path for path, meta in get_custom_mods().items() if meta["side"] == side}
+    globs = get_side_only_override_globs(side)
+    if globs:
+        exact |= {
+            path for path in _all_override_paths()
+            if any(fnmatch.fnmatchcase(path, pattern) for pattern in globs)
+        }
+    return exact
 
 
 def _side_filters(side: str) -> dict:
@@ -416,13 +468,15 @@ def get_modloader_version(manifest: dict) -> str:
     return loaders[0].get("id", "") if loaders else ""
 
 
-def _override_member_allowed(relative_path: str) -> bool:
+def _override_member_allowed(relative_path: str, ignore_patterns: list[str] | None = None) -> bool:
     """
     Return True if an overrides/ member should be version-controlled.
 
     Inside shaderpacks/, only direct .zip files are kept — extracted shaderpack
     folders (which Euphoria Patcher creates when a player uses them) and other
-    non-zip files are skipped so they don't bloat the overrides bundle.
+    non-zip files are skipped so they don't bloat the overrides bundle. Members
+    matching any ignore_patterns glob (from [settings] override_ignore) are skipped
+    too, so mod-written runtime files in config/ don't churn every commit.
     """
     if not relative_path:
         return False
@@ -430,6 +484,8 @@ def _override_member_allowed(relative_path: str) -> bool:
         sub_path = relative_path[len("shaderpacks/"):].rstrip("/")
         if not sub_path or "/" in sub_path or not sub_path.lower().endswith(".zip"):
             return False
+    if ignore_patterns and any(fnmatch.fnmatchcase(relative_path, pattern) for pattern in ignore_patterns):
+        return False
     return True
 
 
@@ -455,13 +511,14 @@ def extract_override_manifest(zip_path: Path | str) -> dict[str, str]:
     if not zip_path.is_file() or zip_path.suffix != ".zip":
         return manifest
 
+    ignore_patterns = get_override_ignore_patterns()
     prefix = "overrides/"
     with zipfile.ZipFile(zip_path, "r") as zf:
         for member_name in zf.namelist():
             if not member_name.startswith(prefix) or member_name.endswith("/"):
                 continue
             relative_path = member_name[len(prefix):]
-            if not _override_member_allowed(relative_path):
+            if not _override_member_allowed(relative_path, ignore_patterns):
                 continue
             with zf.open(member_name) as src:
                 data = src.read()
@@ -1532,7 +1589,15 @@ def release_client(version: str) -> Path | None:
     zip_path = release(version, side="client")
     if zip_path:
         if bake_client_updater():
-            _build_exe(_baked_client_updater_path())
+            # A genuine exe build failure aborts here rather than being swallowed, so
+            # 'release'/'publish' don't report success with a missing or stale exe. A
+            # missing PyInstaller is a soft skip (handled inside _build_exe).
+            try:
+                _build_exe(_baked_client_updater_path())
+            except ExeBuildError as exc:
+                print(f"[ERROR] {exc}")
+                print(f"[ERROR] exe build failed — {zip_path.name} was built, but the release is incomplete.")
+                sys.exit(1)
         export_cf(version)
     return zip_path
 
@@ -2076,13 +2141,24 @@ def _prepare_dance_assets() -> tuple[Path, Path] | None:
     return video_path, audio_path
 
 
+class ExeBuildError(RuntimeError):
+    """Raised when an exe build is attempted (PyInstaller is installed) but fails."""
+
+
 def _build_exe(source_py: Path) -> Path | None:
     """
     Build a standalone Windows exe from source_py using PyInstaller.
-    Prints its own progress, success, and warning messages.
-    Returns the exe path on success, or None if PyInstaller is unavailable or fails.
+    Prints its own progress messages.
+
+    Returns the exe path on success, or None when PyInstaller is not installed
+    (a soft skip — the .py updater still works). Raises ExeBuildError when the build
+    is attempted but genuinely fails, so callers don't silently report success.
     """
     exe_path = source_py.parent / (source_py.stem + ".exe")
+    if importlib.util.find_spec("PyInstaller") is None:
+        print("[WARN] PyInstaller not installed — skipping exe build (the .py updater still works).")
+        print("       To build the exe: pip install pyinstaller yt-dlp imageio-ffmpeg Pillow")
+        return None
     print(f"Building {exe_path.name}...")
     icon_path   = _prepare_icon()
     icon_args   = ["--icon", str(icon_path.resolve())] if icon_path else []
@@ -2115,17 +2191,14 @@ def _build_exe(source_py: Path) -> Path | None:
             ],
             check=True,
         )
-    except FileNotFoundError:
-        print("[WARN] PyInstaller not found — exe not built.")
-        print("       Install build deps: pip install pyinstaller yt-dlp imageio-ffmpeg Pillow")
-        return None
-    except subprocess.CalledProcessError:
-        print("[WARN] PyInstaller build failed — exe not built.")
-        print("       Install build deps: pip install pyinstaller yt-dlp imageio-ffmpeg Pillow")
-        return None
+    except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+        raise ExeBuildError(
+            f"PyInstaller build failed for {exe_path.name}: {exc}\n"
+            "       Check the PyInstaller output above. Build deps: "
+            "pip install pyinstaller yt-dlp imageio-ffmpeg Pillow"
+        ) from exc
     if not exe_path.exists():
-        print("[WARN] PyInstaller finished but exe was not produced.")
-        return None
+        raise ExeBuildError(f"PyInstaller finished but {exe_path.name} was not produced.")
     print(f"[OK] Built {exe_path}")
     if icon_path:
         _clear_icon_cache()
@@ -2154,7 +2227,11 @@ def build_exe() -> None:
     """Build the baked updater exe from releases/{file_prefix}-client-updater.py."""
     if not bake_client_updater():
         sys.exit(1)
-    if not _build_exe(_baked_client_updater_path()):
+    try:
+        if _build_exe(_baked_client_updater_path()) is None:
+            sys.exit(1)  # PyInstaller not installed (message already printed)
+    except ExeBuildError as exc:
+        print(f"[ERROR] {exc}")
         sys.exit(1)
 
 

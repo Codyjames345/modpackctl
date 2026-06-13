@@ -1266,24 +1266,32 @@ class UpdaterApp(tk.Tk):
                 assert self.modpack_dir is not None
                 self.update_plan = _rebuild_plan_with_wipes()
                 _plan         = self.update_plan
-                added_names   = sorted([name for _, _, name, is_upd in _plan["download"] if not is_upd], key=str.lower)
-                updated_names = sorted([name for _, _, name, is_upd in _plan["download"] if is_upd], key=str.lower)
-                _updated_set  = set(updated_names)
+                updated_names = {name for _, _, name, is_upd in _plan["download"] if is_upd}
 
                 ops = self._compute_override_ops(reset_var.get())
                 self.override_ops = ops
-                override_added         = ops["added"]
-                override_removed       = ops["removed"]
-                override_updated       = ops["updated"]
-                override_added_count   = sum(len(v) for v in override_added.values())
-                override_updated_count = sum(len(v) for v in override_updated.values())
+                override_added   = ops["added"]
+                override_removed = ops["removed"]
+                override_updated = ops["updated"]
+
+                def group_downloads(is_update_wanted: bool) -> dict[str, list[str]]:
+                    """Group CurseForge mod downloads by their destination folder
+                    (mods/, shaderpacks/, resourcepacks/) using the snapshot category."""
+                    grouped: dict[str, list[str]] = {}
+                    for project_id, _file_id, name, is_upd in _plan["download"]:
+                        if is_upd != is_update_wanted:
+                            continue
+                        entry = self.new_snapshot.get(project_id) or {}
+                        category = entry.get("category") or "mods"
+                        grouped.setdefault(category, []).append(name)
+                    return grouped
 
                 # Wipe-targets that the override zip re-extracts shouldn't appear in
                 # Removed — they show up under Added/Updated instead (same path, new content).
                 override_write_paths: set[Path] = {self.modpack_dir / p for p in ops["write"]}
                 removed_entries = [
                     (p, name) for p, name in _plan["delete"]
-                    if name not in _updated_set and p not in override_write_paths
+                    if name not in updated_names and p not in override_write_paths
                 ]
                 # Custom mods dropped between versions aren't wipe targets, so add them
                 # to the Removed list explicitly.
@@ -1291,16 +1299,30 @@ class UpdaterApp(tk.Tk):
                     for filename in files:
                         rel = filename if not folder else f"{folder}/{filename}"
                         removed_entries.append((self.modpack_dir / rel, filename))
+                removed_grouped = group_deletes_by_folder(removed_entries, self.modpack_dir)
 
+                # Build the grouped sections (CF mods + override files together), then
+                # guard against any file landing in more than one section.
                 if self.fresh_install:
-                    # Fresh install has no separate "to update" bucket — everything that
-                    # ends up on disk is folded into the to-download count.
-                    num_added   = len(added_names) + override_added_count + override_updated_count
-                    num_updated = 0
+                    # Fresh install has no separate "updated" bucket — everything that
+                    # ends up on disk is one "to download" list.
+                    download_grouped = merge_grouped(
+                        group_downloads(False), group_downloads(True),
+                        override_added, override_updated,
+                    )
+                    dedupe_grouped(download_grouped, {}, removed_grouped)
+                    added_grouped, updated_grouped = download_grouped, {}
                 else:
-                    num_added   = len(added_names) + override_added_count
-                    num_updated = len(updated_names) + override_updated_count
-                num_removed = len(removed_entries)
+                    added_grouped   = merge_grouped(group_downloads(False), override_added)
+                    updated_grouped = merge_grouped(group_downloads(True), override_updated)
+                    dedupe_grouped(added_grouped, updated_grouped, removed_grouped)
+
+                def count(grouped: dict) -> int:
+                    return sum(len(v) for v in grouped.values())
+
+                num_added   = count(added_grouped)
+                num_updated = count(updated_grouped)
+                num_removed = count(removed_grouped)
 
                 # Stats row
                 for child in stats_row.winfo_children():
@@ -1330,11 +1352,11 @@ class UpdaterApp(tk.Tk):
                         font=FONT_BODY, bg=DARK_BG, fg=colour, pady=8,
                     ).pack(side="left")
 
-                # ---- helpers used by the body renderer below ----
                 def render_grouped(grouped: dict, file_tag: str) -> None:
                     """Emit a folder/  +  |_ file tree. Empty-string folder renders as '/'.
+                    Custom mods (mods/) are listed first; configs and other folders follow.
                     Custom mods with a configured display name render by name."""
-                    for folder in sorted(grouped):
+                    for folder in sorted(grouped, key=override_folder_sort_key):
                         files = sorted(grouped[folder], key=str.lower)
                         if not files:
                             continue
@@ -1345,31 +1367,6 @@ class UpdaterApp(tk.Tk):
                             label = self.custom_mod_names.get(full_path, name)
                             text.insert("end", f"    |_ {label}\n", file_tag)
 
-                def render_deletes() -> None:
-                    assert self.modpack_dir is not None
-                    grouped = group_deletes_by_folder(removed_entries, self.modpack_dir)
-                    render_grouped(grouped, "removed")
-
-                def group_downloads(is_update_wanted: bool) -> dict[str, list[str]]:
-                    """Group CurseForge mod downloads by their destination folder
-                    (mods/, shaderpacks/, resourcepacks/) using the snapshot category."""
-                    grouped: dict[str, list[str]] = {}
-                    for project_id, _file_id, name, is_upd in _plan["download"]:
-                        if is_upd != is_update_wanted:
-                            continue
-                        entry = self.new_snapshot.get(project_id) or {}
-                        category = entry.get("category") or "mods"
-                        grouped.setdefault(category, []).append(name)
-                    return grouped
-
-                def merge_grouped(*groups: dict) -> dict[str, list[str]]:
-                    """Combine several {folder: [name]} dicts into one."""
-                    out: dict[str, list[str]] = {}
-                    for group in groups:
-                        for folder, files in group.items():
-                            out.setdefault(folder, []).extend(files)
-                    return out
-
                 # Body
                 text.config(state="normal")
                 text.delete("1.0", "end")
@@ -1377,28 +1374,19 @@ class UpdaterApp(tk.Tk):
                 if self.fresh_install:
                     text.insert("end", "To Download\n", "section_added")
                     text.insert("end", "\n")
-                    # Everything that ends up on disk, grouped by destination folder
-                    # (mods/, shaderpacks/, resourcepacks/, config/, …).
-                    download_grouped = merge_grouped(
-                        group_downloads(False), group_downloads(True),
-                        override_added, override_updated,
-                    )
-                    if download_grouped:
-                        render_grouped(download_grouped, "added")
+                    if added_grouped:
+                        render_grouped(added_grouped, "added")
                     else:
                         text.insert("end", "  Nothing to download.\n", "placeholder")
                     text.insert("end", "\n")
 
                     text.insert("end", "To Delete\n", "section_removed")
                     text.insert("end", "\n")
-                    if removed_entries:
-                        render_deletes()
+                    if removed_grouped:
+                        render_grouped(removed_grouped, "removed")
                     else:
                         text.insert("end", "  Nothing to delete.\n", "placeholder")
                 else:
-                    added_grouped   = merge_grouped(group_downloads(False), override_added)
-                    updated_grouped = merge_grouped(group_downloads(True), override_updated)
-
                     text.insert("end", "Added\n", "section_added")
                     text.insert("end", "\n")
                     if added_grouped:
@@ -1409,8 +1397,8 @@ class UpdaterApp(tk.Tk):
 
                     text.insert("end", "Removed\n", "section_removed")
                     text.insert("end", "\n")
-                    if removed_entries:
-                        render_deletes()
+                    if removed_grouped:
+                        render_grouped(removed_grouped, "removed")
                     else:
                         text.insert("end", "  No files removed.\n", "placeholder")
                     text.insert("end", "\n")
